@@ -47,6 +47,6 @@ class CreateInstruments < ActiveRecord::Migration[8.0]
     add_index :instruments, %i[security_id symbol_name exchange segment], unique: true, name: 'index_instruments_unique'
     add_index :instruments, :instrument_code
     add_index :instruments, :symbol_name
-    add_index :instruments, [:underlying_symbol, :expiry_date], where: "underlying_symbol IS NOT NULL"
+    add_index :instruments, %i[underlying_symbol expiry_date], where: 'underlying_symbol IS NOT NULL'
   end
 end

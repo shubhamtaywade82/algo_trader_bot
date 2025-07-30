@@ -48,6 +48,6 @@ class CreateDerivatives < ActiveRecord::Migration[8.0]
     add_index :derivatives, %i[security_id symbol_name exchange segment], unique: true, name: 'index_derivatives_unique'
     add_index :derivatives, :instrument_code
     add_index :derivatives, :symbol_name
-    add_index :derivatives, [:underlying_symbol, :expiry_date], where: "underlying_symbol IS NOT NULL"
+    add_index :derivatives, %i[underlying_symbol expiry_date], where: 'underlying_symbol IS NOT NULL'
   end
 end
