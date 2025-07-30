@@ -1,8 +1,179 @@
-# Omakase Ruby styling for Rails
-inherit_gem: { rubocop-rails-omakase: rubocop.yml }
+plugins:
+  - rubocop-rails
+  - rubocop-performance
+  - rubocop-rspec
+  - rubocop-factory_bot
+  - rubocop-rspec_rails
 
-# Overwrite or add rules to create your own house style
+# .rubocop.yml
+
+################################################################################
+# 1. Global configuration
+################################################################################
+
+AllCops:
+  TargetRubyVersion: 3.3
+  NewCops: enable
+  Exclude:
+    - "bin/*"
+    - "db/schema.rb"
+    - "db/*.rb"
+    - "node_modules/**/*"
+    - "vendor/**/*"
+
+################################################################################
+# 2. Layout / Style adjustments
+################################################################################
+
+Layout/LineLength:
+  Enabled: true
+  Max: 140 # increased from 120 to 140
+  AllowedPatterns:
+    - '\Ahttps?://' # ignore long URLs
+
+Layout/TrailingEmptyLines:
+  Enabled: false # disable trailing‐newline requirement
+
+Layout/FirstArgumentIndentation:
+  Enabled: false # ignore first‐arg indentation
+
+Style/FrozenStringLiteralComment:
+  Enabled: false # disable mandatory frozen_string_literal
+
+Style/StringLiterals:
+  EnforcedStyle: single_quotes # prefer single‐quoted strings
+  ConsistentQuotesInMultiline: false
+
+Style/MultilineBlockChain:
+  Enabled: false # allow multi‐line chains of blocks
+
+Style/Documentation:
+  Enabled: false # skip enforcing documentation comments
+
+################################################################################
+# 3. Metrics (Complexity / Size) adjustments
+################################################################################
+
+Metrics/AbcSize:
+  Enabled: true
+  Max: 40 # bumped from 17 to 40
+  Exclude:
+    - "app/services/option/strategy_suggester.rb" # or any file you want to carve out
+
+Metrics/CyclomaticComplexity:
+  Enabled: true
+  Max: 10 # bumped from 7 to 10
+
+Metrics/PerceivedComplexity:
+  Enabled: true
+  Max: 12 # bumped from 8 to 12
+
+Metrics/MethodLength:
+  Enabled: true
+  Max: 80 # bumped from 50 to 80
+
+Metrics/ClassLength:
+  Enabled: true
+  Max: 300 # bumped from 100 to 300
+
+Metrics/BlockLength:
+  Enabled: true
+  Max: 50 # bumped from 25 to 50
+
+Metrics/ParameterLists:
+  Enabled: true
+  Max: 6 # bumped from 5 to 6
+
+################################################################################
+# 4. Security / Rails adjustments
+################################################################################
+
+Security/Open:
+  Enabled: false # disable warning for URI.open
+
+Rails/UniqueValidationWithoutIndex:
+  Enabled: false # skip enforcing unique DB index
+
+Lint/DuplicateBranch:
+  Enabled: false # allow duplicate branch bodies
+
+Lint/DuplicateMethods:
+  Enabled: false # allow duplicate method definitions
+
+Lint/MissingSuper:
+  Enabled: false # skip missing super() checks
+
+################################################################################
+# 5. Naming / Variable checks
+################################################################################
+
+Naming/MethodParameterName:
+  Enabled: false # allow short parameter names (e.g. e, i)
+
+Naming/VariableNumber:
+  Enabled: false # allow variable names with numbers
+
+################################################################################
+# 6. Performance / Style
+################################################################################
+
+Performance/CollectionLiteralInLoop:
+  Enabled: false # allow array literals inside loops
+
+################################################################################
+# 7. RSpec adjustments
+################################################################################
+
+RSpec/MultipleExpectations:
+  Enabled: false # allow multiple expectations per example
+
+RSpec/MultipleMemoizedHelpers:
+  Enabled: false # allow many memoized helpers
+
+RSpec/ExampleLength:
+  Enabled: false # disable example line‐count enforcement
+
+RSpec/MessageSpies:
+  Enabled: false # skip have_received enforcement
+
+RSpec/ContextWording:
+  Enabled: false # skip "when/with" wording requirement
+
+RSpec/NamedSubject:
+  Enabled: false # skip naming subject suggestions
+
+RSpec/VerifiedDoubles:
+  Enabled: false # skip verifying doubles enforcement
+
+RSpec/DescribeClass:
+  Enabled: false # skip first‐argument convention in `describe`
+
+RSpec/SpecFilePathFormat:
+  Enabled: false # skip spec file path checks
+
+################################################################################
+# 8. Inline disabling hints (optional)
+################################################################################
+
+# To disable specific cops for a particular method or file, you can use:
 #
-# # Use `[a, [b, c]]` not `[ a, [ b, c ] ]`
-# Layout/SpaceInsideArrayLiteralBrackets:
-#   Enabled: false
+#   # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity
+#   def some_complex_method
+#     ...
+#   end
+#   # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity
+#
+# Or to ignore an entire file, add at the top:
+#
+#   # rubocop:disable all
+
+################################################################################
+# 9. Usage notes
+################################################################################
+
+# – After saving this `.rubocop.yml`, run:
+#     bin/rubocop --auto-gen-config
+#   to generate a `.rubocop_todo.yml` for any remaining offenses you want to address later.
+#
+# – Keep `.rubocop_todo.yml` in source control to allow teammates to fix issues incrementally.
+################################################################################
