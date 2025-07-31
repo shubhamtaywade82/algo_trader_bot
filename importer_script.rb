@@ -120,7 +120,6 @@ derivatives_rows.each do |h|
   parent_code = InstrumentTypeMapping.underlying_for(h[:instrument_code]) # FUTIDX→INDEX
   key         = [parent_code, h[:underlying_symbol].upcase]
 
-  pp key
   if (pid = lookup[key])
     h[:instrument_id] = pid
     with_parent << h

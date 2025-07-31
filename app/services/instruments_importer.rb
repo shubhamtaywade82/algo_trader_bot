@@ -6,23 +6,51 @@ require 'open-uri'
 
 class InstrumentsImporter
   CSV_URL         = 'https://images.dhan.co/api-data/api-scrip-master-detailed.csv'
+  CACHE_PATH      = Rails.root.join('tmp/dhan_scrip_master.csv') # ← NEW
+  CACHE_MAX_AGE   = 24.hours # ← NEW
   VALID_EXCHANGES = %w[NSE BSE].freeze
   BATCH_SIZE      = 1_000
 
   class << self
     # ------------------------------------------------------------
-    # Public entry points
+    # Public entry point
     # ------------------------------------------------------------
     def import_from_url
-      csv = URI.open(CSV_URL).read
-      import_from_csv(csv)
+      csv_text = fetch_csv_with_cache # ← NEW (was: URI.open(CSV_URL).read)
+      import_from_csv(csv_text)
     end
+
+    # ------------------------------------------------------------
+    # Fetch CSV with 24-hour cache
+    # ------------------------------------------------------------
+    def fetch_csv_with_cache # ← NEW helper
+      if CACHE_PATH.exist? && Time.current - CACHE_PATH.mtime < CACHE_MAX_AGE
+        Rails.logger.info "Using cached CSV (#{CACHE_PATH})"
+        return CACHE_PATH.read
+      end
+
+      Rails.logger.info 'Downloading fresh CSV from Dhan…'
+      csv_text = URI.open(CSV_URL).read
+
+      CACHE_PATH.dirname.mkpath
+      File.write(CACHE_PATH, csv_text)
+      Rails.logger.info "Saved CSV to #{CACHE_PATH}"
+
+      csv_text
+    rescue StandardError => e
+      Rails.logger.warn "CSV download failed: #{e.message}"
+      raise e if CACHE_PATH.exist? == false   # don’t swallow if no fallback
+
+      Rails.logger.warn 'Falling back to cached CSV (may be stale)'
+      CACHE_PATH.read
+    end
+    private :fetch_csv_with_cache             # keep helper private
 
     def import_from_csv(csv_content)
       instruments_rows, derivatives_rows = build_batches(csv_content)
-
-      instruments_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
-      derivatives_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
+      pp instruments_rows.size, derivatives_rows.size
+      # instruments_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
+      # derivatives_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
 
       import_instruments!(instruments_rows)  unless instruments_rows.empty?
       import_derivatives!(derivatives_rows)  unless derivatives_rows.empty?
@@ -148,25 +176,28 @@ class InstrumentsImporter
     def attach_instrument_ids(rows)
       enum_to_csv = Instrument.instrument_codes
 
-      # 🔑 lookup key = [csv_code, UNDERLYING_SYMBOL, exch/seg]
+      # 🔑 lookup key = [csv_code, UNDERLYING_SYMBOL]
       lookup = Instrument.pluck(
         :id, :instrument_code, :underlying_symbol, :exchange, :segment
       ).each_with_object({}) do |(id, enum_code, sym, exch, seg), h|
         next if sym.blank?
 
-        csv_code = enum_to_csv[enum_code] || enum_code
-        key      = [csv_code, sym.upcase, "#{exch}/#{seg}"]
+        csv_code = enum_to_csv[enum_code] || enum_code # keep CSV code itself
+        key      = [csv_code, sym.upcase]
         h[key]   = id
       end
 
+      puts "lookup size: #{lookup.size}"
+
       with_parent    = []
       without_parent = []
-
+      count = 0
       rows.each do |h|
+        count += 1 if h[:underlying_symbol]
         next without_parent << h if h[:underlying_symbol].blank?
 
-        parent_code = InstrumentTypeMapping.underlying_for(h[:instrument_type]) # FUTIDX → INDEX
-        key         = [parent_code, h[:underlying_symbol].upcase, "#{h[:exchange]}/#{h[:segment]}"]
+        parent_code = InstrumentTypeMapping.underlying_for(h[:instrument_code]) # FUTIDX ➜ INDEX
+        key         = [parent_code, h[:underlying_symbol].upcase]
 
         if (pid = lookup[key])
           h[:instrument_id] = pid
@@ -176,6 +207,7 @@ class InstrumentsImporter
         end
       end
 
+      pp count
       [with_parent, without_parent]
     end
 

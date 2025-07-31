@@ -20,6 +20,9 @@ namespace :instruments do
       pp "BSE Derivatives: #{Derivative.bse.count}"
       pp "Options: #{Derivative.options.count}"
       pp "Futures: #{Derivative.futures.count}"
+      pp 'Instruments: Instrument.count'
+      pp 'Derivatives: Derivative.count'
+      pp "TOTAL: #{Instrument.count + Derivative.count}"
     rescue StandardError => e
       pp "Import failed: #{e.message}"
       pp e.backtrace.join("\n")
