@@ -21,7 +21,7 @@ ActiveRecord::Schema[8.0].define(version: 2025_07_30_182124) do
     t.string "security_id"
     t.string "isin"
     t.string "instrument_code"
-    t.integer "underlying_security_id"
+    t.string "underlying_security_id"
     t.string "underlying_symbol"
     t.string "symbol_name"
     t.string "display_name"
@@ -70,7 +70,7 @@ ActiveRecord::Schema[8.0].define(version: 2025_07_30_182124) do
     t.string "security_id", null: false
     t.string "isin"
     t.string "instrument_code"
-    t.integer "underlying_security_id"
+    t.string "underlying_security_id"
     t.string "underlying_symbol"
     t.string "symbol_name"
     t.string "display_name"

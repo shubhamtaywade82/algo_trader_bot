@@ -7,7 +7,7 @@ class CreateDerivatives < ActiveRecord::Migration[8.0]
       t.string :security_id
       t.string :isin
       t.string :instrument_code
-      t.integer :underlying_security_id
+      t.string :underlying_security_id
       t.string :underlying_symbol
       t.string :symbol_name
       t.string :display_name

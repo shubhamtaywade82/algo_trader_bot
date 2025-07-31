@@ -5,7 +5,7 @@ module InstrumentHelpers
     # Enums common to Instrument and Derivative
     enum :exchange, { nse: 'NSE', bse: 'BSE', mcx: 'MCX' }
     enum :segment, { index: 'I', equity: 'E', currency: 'C', derivatives: 'D', commodity: 'M' }, prefix: true
-    enum :instrument_type, {
+    enum :instrument_code, {
       index: 'INDEX',
       futures_index: 'FUTIDX',
       options_index: 'OPTIDX',
@@ -17,6 +17,9 @@ module InstrumentHelpers
       futures_commodity: 'FUTCOM',
       options_commodity: 'OPTFUT'
     }, prefix: true
+
+    scope :nse, -> { where(exchange: 'NSE') }
+    scope :bse, -> { where(exchange: 'BSE') }
 
     # Validations for enums can also go here, if common
   end
