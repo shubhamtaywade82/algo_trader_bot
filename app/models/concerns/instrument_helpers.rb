@@ -43,7 +43,7 @@ module InstrumentHelpers
   end
 
   def fetch_ltp_from_api
-    response = Dhanhq::API::MarketFeed.ltp(exch_segment_enum)
+    response = DhanHQ::Models::MarketFeed.ltp(exch_segment_enum)
     response.dig('data', exchange_segment, security_id.to_s, 'last_price') if response['status'] == 'success'
   rescue StandardError => e
     Rails.logger.error("Failed to fetch LTP from API for #{self.class.name} #{security_id}: #{e.message}")
@@ -51,7 +51,7 @@ module InstrumentHelpers
   end
 
   def ohlc
-    response = Dhanhq::API::MarketFeed.ohlc(exch_segment_enum)
+    response = DhanHQ::Models::MarketFeed.ohlc(exch_segment_enum)
     response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil
   rescue StandardError => e
     Rails.logger.error("Failed to fetch OHLC for #{self.class.name} #{security_id}: #{e.message}")
@@ -89,7 +89,7 @@ module InstrumentHelpers
   end
 
   def depth
-    response = Dhanhq::API::MarketFeed.quote(exch_segment_enum)
+    response = DhanHQ::Models::MarketFeed.quote(exch_segment_enum)
     response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil
   rescue StandardError => e
     Rails.logger.error("Failed to fetch Depth for #{self.class.name} #{security_id}: #{e.message}")

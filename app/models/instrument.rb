@@ -8,12 +8,11 @@ class Instrument < ApplicationRecord
   # API Methods
   def fetch_option_chain(expiry = nil)
     expiry ||= expiry_list.first
-    response = Dhanhq::API::Option.chain(
-      UnderlyingScrip: security_id.to_i,
-      UnderlyingSeg: exchange_segment,
-      Expiry: expiry
+    data = DhanHQ::Models::OptionChain.fetch(
+      underlying_scrip: security_id.to_i,
+      underlying_seg: exchange_segment,
+      expiry: expiry
     )
-    data = response['data']
     return nil unless data
 
     filtered_data = filter_option_chain_data(data)
@@ -41,10 +40,9 @@ class Instrument < ApplicationRecord
   end
 
   def expiry_list
-    response = Dhanhq::API::Option.expiry_list(
-      UnderlyingScrip: security_id,
-      UnderlyingSeg: exchange_segment
+    DhanHQ::Models::OptionChain.fetch_expiry_list(
+      underlying_scrip: security_id.to_i,
+      underlying_seg: exchange_segment
     )
-    response['data']
   end
 end
