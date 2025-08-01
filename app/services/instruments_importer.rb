@@ -187,7 +187,7 @@ class InstrumentsImporter
         h[key]   = id
       end
 
-      puts "lookup size: #{lookup.size}"
+      Rails.logger.debug { "lookup size: #{lookup.size}" }
 
       with_parent    = []
       without_parent = []
@@ -207,7 +207,6 @@ class InstrumentsImporter
         end
       end
 
-      pp count
       [with_parent, without_parent]
     end
 
