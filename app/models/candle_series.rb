@@ -15,10 +15,10 @@ class CandleSeries
   def load_from_raw(response)
     normalise_candles(response).each do |row|
       @candles << Candle.new(
-        ts: Time.zone.parse(row['timestamp'].to_s),
-        open: row['open'], high: row['high'],
-        low: row['low'], close: row['close'],
-        volume: row['volume']
+        ts: Time.zone.parse(row[:timestamp].to_s),
+        open: row[:open], high: row[:high],
+        low: row[:low], close: row[:close],
+        volume: row[:volume]
       )
     end
   end
@@ -37,7 +37,7 @@ class CandleSeries
         close: resp['close'][i].to_f,
         high: resp['high'][i].to_f,
         low: resp['low'][i].to_f,
-        timestamp: Time.zone.parse(resp['timestamp'][i].to_s),
+        timestamp: Time.zone.at(resp['timestamp'][i]),
         volume: resp['volume'][i].to_i
       }
     end
