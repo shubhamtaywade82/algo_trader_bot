@@ -14,7 +14,7 @@ module Indicators
     end
 
     def adx(period = 14)
-      hlc = @series.candles.each_with_index.map do |c, i|
+      hlc = @series.candles.each_with_index.map do |c, _i|
         {
           date_time: Time.zone.at(c.timestamp || 0), # <- NEW
           high: c.high,

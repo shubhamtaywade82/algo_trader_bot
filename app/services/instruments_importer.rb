@@ -23,7 +23,8 @@ class InstrumentsImporter
     # ------------------------------------------------------------
     # Fetch CSV with 24-hour cache
     # ------------------------------------------------------------
-    def fetch_csv_with_cache # ← NEW helper
+    # ← NEW helper
+    def fetch_csv_with_cache
       if CACHE_PATH.exist? && Time.current - CACHE_PATH.mtime < CACHE_MAX_AGE
         Rails.logger.info "Using cached CSV (#{CACHE_PATH})"
         return CACHE_PATH.read
@@ -48,7 +49,7 @@ class InstrumentsImporter
 
     def import_from_csv(csv_content)
       instruments_rows, derivatives_rows = build_batches(csv_content)
-      pp instruments_rows.size, derivatives_rows.size
+      Rails.logger.debug instruments_rows.size, derivatives_rows.size
       # instruments_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
       # derivatives_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
 
@@ -179,7 +180,7 @@ class InstrumentsImporter
       # 🔑 lookup key = [csv_code, UNDERLYING_SYMBOL]
       lookup = Instrument.pluck(
         :id, :instrument_code, :underlying_symbol, :exchange, :segment
-      ).each_with_object({}) do |(id, enum_code, sym, exch, seg), h|
+      ).each_with_object({}) do |(id, enum_code, sym, _exch, _seg), h|
         next if sym.blank?
 
         csv_code = enum_to_csv[enum_code] || enum_code # keep CSV code itself

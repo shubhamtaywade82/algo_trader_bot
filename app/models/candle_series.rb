@@ -67,4 +67,21 @@ class CandleSeries
     macd = RubyTechnicalAnalysis::Macd.new(series: closes, fast_period: fast_period, slow_period: slow_period, signal_period: signal_period)
     macd.call
   end
+
+  def rate_of_change(period = 5)
+    closes = self.closes
+    return nil if closes.size < period + 1
+
+    # ((current_close - close_n_periods_ago) / close_n_periods_ago) * 100
+    roc_series = []
+    closes.each_with_index do |price, idx|
+      if idx < period
+        roc_series << nil # not enough data for these initial points
+      else
+        previous_price = closes[idx - period]
+        roc_series << (((price - previous_price) / previous_price.to_f) * 100.0)
+      end
+    end
+    roc_series
+  end
 end

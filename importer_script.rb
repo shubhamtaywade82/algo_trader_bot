@@ -2,13 +2,13 @@
 require 'csv'
 require 'open-uri'
 
-CSV_URL         = 'https://images.dhan.co/api-data/api-scrip-master-detailed.csv'
-VALID_EXCHANGES = %w[NSE BSE]
+CSV_URL         = 'https://images.dhan.co/api-data/api-scrip-master-detailed.csv'.freeze
+VALID_EXCHANGES = %w[NSE BSE].freeze
 now             = Time.zone.now
 
 # Helper: convert single-letter segment char → enum value
 SEGMENT_MAP = { 'I' => 'index', 'E' => 'equity', 'C' => 'currency',
-                'D' => 'derivatives', 'M' => 'commodity' }
+                'D' => 'derivatives', 'M' => 'commodity' }.freeze
 
 def safe_date(str)
   Date.parse(str)
@@ -101,7 +101,7 @@ enum_to_csv = Instrument.instrument_codes # "equity"=>"EQUITY", etc.
 
 lookup = Instrument.pluck(
   :id, :instrument_code, :underlying_symbol, :exchange, :segment
-).each_with_object({}) do |(id, enum_code, sym, exch, seg), h|
+).each_with_object({}) do |(id, enum_code, sym, _exch, _seg), h|
   next if sym.blank?
 
   csv_code = enum_to_csv[enum_code] || enum_code # keep CSV code itself
