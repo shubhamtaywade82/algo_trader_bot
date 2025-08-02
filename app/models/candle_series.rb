@@ -46,4 +46,25 @@ class CandleSeries
   def closes = candles.map(&:close)
   def highs  = candles.map(&:high)
   def lows   = candles.map(&:low)
+
+  def rsi(period = 14)
+    RubyTechnicalAnalysis::RelativeStrengthIndex.new(series: closes, period: period).call
+  end
+
+  def moving_average(period = 20)
+    RubyTechnicalAnalysis::MovingAverages.new(series: closes, period: period)
+  end
+
+  def sma(period = 20)
+    moving_average(period).sma
+  end
+
+  def ema(period = 20)
+    moving_average(period).ema
+  end
+
+  def macd(fast_period = 12, slow_period = 26, signal_period = 9)
+    macd = RubyTechnicalAnalysis::Macd.new(series: closes, fast_period: fast_period, slow_period: slow_period, signal_period: signal_period)
+    macd.call
+  end
 end
