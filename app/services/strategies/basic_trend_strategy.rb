@@ -9,9 +9,13 @@ module Strategies
 
     def call
       calc = Indicators::Calculator.new(@series)
-      return :buy_ce if calc.signal?
-
-      :hold
+      if calc.bullish_signal?
+        :buy_ce
+      elsif calc.bearish_signal?
+        :buy_pe
+      else
+        :hold
+      end
     end
   end
 end

@@ -9,8 +9,7 @@ module Indicators
     end
 
     def macd
-      macd = RubyTechnicalAnalysis::MACD.new(series: @series.closes)
-      macd.call
+      RubyTechnicalAnalysis::Macd.new(series: @series.closes).call
     end
 
     def adx(period = 14)
@@ -22,13 +21,15 @@ module Indicators
           close: c.close
         }
       end
-      TechnicalAnalysis::Adx.calculate(hlc, period:)
+      TechnicalAnalysis::Adx.calculate(hlc, period:).last.adx
     end
 
-    def signal?
-      rsi_val = rsi
-      adx_val = adx.last.adx
-      rsi_val < 30 && adx_val > 20
+    def bullish_signal?
+      rsi < 30 && adx > 20 && series.closes.last > series.closes[-2]
+    end
+
+    def bearish_signal?
+      rsi > 70 && adx > 20 && series.closes.last < series.closes[-2]
     end
   end
 end
