@@ -43,9 +43,62 @@ class CandleSeries
     end
   end
 
+  def opens  = candles.map(&:open)
   def closes = candles.map(&:close)
   def highs  = candles.map(&:high)
   def lows   = candles.map(&:low)
+
+  def swing_high?(index, lookback = 2)
+    return false if index < lookback || index + lookback >= candles.size
+
+    current = candles[index].high
+    left = candles[(index - lookback)...index].map(&:high)
+    right = candles[(index + 1)..(index + lookback)].map(&:high)
+    current > left.max && current > right.max
+  end
+
+  def swing_low?(index, lookback = 2)
+    return false if index < lookback || index + lookback >= candles.size
+
+    current = candles[index].low
+    left = candles[(index - lookback)...index].map(&:low)
+    right = candles[(index + 1)..(index + lookback)].map(&:low)
+    current < left.min && current < right.min
+  end
+
+  def recent_highs(n = 20)
+    candles.last(n).map(&:high)
+  end
+
+  def recent_lows(n = 20)
+    candles.last(n).map(&:low)
+  end
+
+  def previous_swing_high
+    recent_highs.sort[-2] # 2nd highest
+  end
+
+  def previous_swing_low
+    recent_lows.sort[1]   # 2nd lowest
+  end
+
+  def liquidity_grab_up?(lookback: 20)
+    high_now = candles.last.high
+    high_prev = previous_swing_high
+
+    high_now > high_prev &&
+      candles.last.close < high_prev && # Rejection after breakout
+      candles.last.bearish?
+  end
+
+  def liquidity_grab_down?(lookback: 20)
+    low_now = candles.last.low
+    low_prev = previous_swing_low
+
+    low_now < low_prev &&
+      candles.last.close > low_prev && # Rejection after breakdown
+      candles.last.bullish?
+  end
 
   def rsi(period = 14)
     RubyTechnicalAnalysis::RelativeStrengthIndex.new(series: closes, period: period).call
