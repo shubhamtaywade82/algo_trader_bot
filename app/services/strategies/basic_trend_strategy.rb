@@ -1,5 +1,5 @@
 module Strategies
-  class BasicTrendStrategy
+  class BasicTrendStrategy < ApplicationService
     def initialize(instrument)
       @instrument = instrument
       raw_data = instrument.intraday_ohlc(interval: '5')
@@ -7,7 +7,7 @@ module Strategies
       @series.load_from_raw(raw_data)
     end
 
-    def run
+    def call
       calc = Indicators::Calculator.new(@series)
       return :buy_ce if calc.signal?
 

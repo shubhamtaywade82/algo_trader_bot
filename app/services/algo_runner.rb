@@ -1,7 +1,7 @@
 class AlgoRunner
   def self.execute_all
     Instrument.watchlist.find_each do |inst|
-      result = Strategies::BasicTrendStrategy.new(inst).run
+      result = Strategies::BasicTrendStrategy.call(inst)
       case result
       when :buy_ce
         Execution::OrderExecutor.buy_option_ce(inst)
