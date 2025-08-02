@@ -59,7 +59,7 @@ module InstrumentHelpers
   end
 
   def historical_ohlc(from_date: nil, to_date: nil, oi: false)
-    Dhanhq::API::Historical.daily(
+    DhanHQ::Models::HistoricalData.daily(
       securityId: security_id,
       exchangeSegment: exchange_segment,
       instrument: instrument_type,
@@ -74,14 +74,14 @@ module InstrumentHelpers
   end
 
   def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil)
-    Dhanhq::API::Historical.intraday(
-      securityId: security_id,
-      exchangeSegment: exchange_segment,
+    DhanHQ::Models::HistoricalData.intraday(
+      security_id: security_id,
+      exchange_segment: exchange_segment,
       instrument: instrument_type,
       interval: interval,
       oi: oi,
-      fromDate: from_date || (Time.zone.today - 90).to_s,
-      toDate: to_date || (Time.zone.today - 1).to_s
+      from_date: from_date || (Time.zone.today - 90).to_s,
+      to_date: to_date || (Time.zone.today - 1).to_s
     )
   rescue StandardError => e
     Rails.logger.error("Failed to fetch Intraday OHLC for #{self.class.name} #{security_id}: #{e.message}")
