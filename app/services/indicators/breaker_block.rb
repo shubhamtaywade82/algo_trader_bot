@@ -1,6 +1,6 @@
 module Indicators
   class BreakerBlock
-    def initialize(series)
+    def initialize(series:)
       @series = series
       @candles = series.candles
     end

@@ -149,4 +149,12 @@ class CandleSeries
 
     :short_entry if latest_close < latest_trend
   end
+
+  def inside_bar?(i)
+    return false if i < 1
+
+    curr = @candles[i]
+    prev = @candles[i - 1]
+    curr.high < prev.high && curr.low > prev.low
+  end
 end
