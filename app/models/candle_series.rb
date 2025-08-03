@@ -137,4 +137,16 @@ class CandleSeries
     end
     roc_series
   end
+
+  def supertrend_signal
+    trend_line = Indicators::Supertrend.new(series: candles).call
+    return nil if trend_line.empty?
+
+    latest_close = closes.last
+    latest_trend = trend_line.last
+
+    return :long_entry if latest_close > latest_trend
+
+    :short_entry if latest_close < latest_trend
+  end
 end
