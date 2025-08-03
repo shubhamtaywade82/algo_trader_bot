@@ -5,7 +5,7 @@ module Indicators
       rsi macd stochastic_intraday momentum_index chaikin_money_flow
       bollinger_bands pivot_points mass_index qstick rate_of_change
       wilders_smoothing volume_oscillator williams_r price_channel
-    ]
+    ].freeze
     attr_reader :series
 
     def initialize(series) = @series = series

@@ -14,7 +14,7 @@ module Strategies
       return :short if grab_up
       return :long  if grab_down
 
-      nil
+      false
     end
   end
 end

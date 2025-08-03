@@ -9,7 +9,7 @@ module Strategies
     end
 
     def call
-      return hold_signal("Not enough candles") if series.size < 50
+      return hold_signal('Not enough candles') if series.size < 50
 
       # Run all SMC indicators
       bos     = SMC::Bos.call(series: series)
@@ -34,13 +34,17 @@ module Strategies
       confidence = score
 
       if confidence >= 70 && (bos || choch)
-        action = grab_up ? :buy_pe : grab_dn ? :buy_ce : :hold
+        action = if grab_up
+                   :buy_pe
+                 else
+                   grab_dn ? :buy_ce : :hold
+                 end
         build_signal(action, confidence)
       else
         hold_signal("Low SMC confidence: #{confidence}%")
       end
-    rescue => e
-      notify_failure(e, "SMCStrategy")
+    rescue StandardError => e
+      notify_failure(e, 'SMCStrategy')
       hold_signal("Exception: #{e.message}")
     end
 
@@ -86,7 +90,7 @@ module Strategies
     def derive_tp(action)
       atr = Indicators::AtrBand.call(series: series)
       last = series.last
-      action == :buy_ce ? last.close + 3 * atr : last.close - 3 * atr
+      action == :buy_ce ? last.close + (3 * atr) : last.close - (3 * atr)
     end
 
     def hold_signal(reason)

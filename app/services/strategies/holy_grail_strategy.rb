@@ -24,7 +24,7 @@ module Strategies
         result: result,
         total_score: total_score,
         components: signal_components,
-        action: result == :buy_ce || result == :buy_pe ? :trade : :hold,
+        action: %i[buy_ce buy_pe].include?(result) ? :trade : :hold,
         sl: dynamic_stop_loss,
         tp: dynamic_take_profit,
         trail: dynamic_trailing_step

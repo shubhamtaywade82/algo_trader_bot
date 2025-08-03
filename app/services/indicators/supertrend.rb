@@ -13,8 +13,6 @@ module Indicators
       atr = calculate_atr
       return [] if atr.empty?
 
-      final_upper_band = []
-      final_lower_band = []
       supertrend = []
       trend = [] # :bullish or :bearish
 
@@ -33,10 +31,10 @@ module Indicators
           prev_supertrend = supertrend[i - 1]
 
           if prev_close <= supertrend[i - 1]
-            supertrend[i] = upper_band < prev_supertrend ? upper_band : prev_supertrend
+            supertrend[i] = [upper_band, prev_supertrend].min
             trend[i] = candle.close <= supertrend[i] ? :bearish : :bullish
           else
-            supertrend[i] = lower_band > prev_supertrend ? lower_band : prev_supertrend
+            supertrend[i] = [lower_band, prev_supertrend].max
             trend[i] = candle.close >= supertrend[i] ? :bullish : :bearish
           end
         end
@@ -54,7 +52,7 @@ module Indicators
       atr = []
 
       series.each_with_index do |candle, i|
-        if i == 0
+        if i.zero?
           tr[i] = candle.high - candle.low
         else
           prev_close = series[i - 1].close

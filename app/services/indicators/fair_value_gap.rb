@@ -6,7 +6,7 @@ module Indicators
 
     def detect
       fvg_zones = []
-      @series.each_cons(3).with_index do |(c1, c2, c3), i|
+      @series.each_cons(3).with_index do |(c1, _c2, c3), i|
         if c3.low > c1.high
           fvg_zones << { index: i + 1, from: c1.high, to: c3.low, direction: :up }
         elsif c3.high < c1.low

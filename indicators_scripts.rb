@@ -11,4 +11,5 @@ Indicators::Calculator.new(series).rsi
 Strategies::BasicTrendStrategy.call(instrument)
 Strategies::SmartMoneyStrategy.new(instrument).call
 
-reload!; Analysis::OptionsBehaviourAnalyzer.call(option_chain: instrument.fetch_option_chain, expiry: instrument.expiry_list.first, underlying_spot: instrument.ltp, symbol: instrument.symbol_name, historical: instrument.intraday_ohlc) # rubocop:disable Layout/LineLength
+reload!
+Analysis::OptionsBehaviourAnalyzer.call(option_chain: instrument.fetch_option_chain, expiry: instrument.expiry_list.first, underlying_spot: instrument.ltp, symbol: instrument.symbol_name, historical: instrument.intraday_ohlc) # rubocop:disable Layout/LineLength
