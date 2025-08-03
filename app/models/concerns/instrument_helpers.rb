@@ -1,5 +1,6 @@
 module InstrumentHelpers
   extend ActiveSupport::Concern
+  include CandleExtension
 
   included do
     # Enums common to Instrument and Derivative
