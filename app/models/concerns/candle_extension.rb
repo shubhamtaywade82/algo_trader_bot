@@ -56,7 +56,8 @@ module CandleExtension
     def supertrend_signal(interval: '5')
       cs = candles(interval: interval)
       cs&.supertrend_signal
-
+    end
+    
     def liquidity_grab_up?(interval: '5')
       cs = candles(interval: interval)
       cs&.liquidity_grab_up?
