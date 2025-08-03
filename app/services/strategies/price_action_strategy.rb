@@ -3,16 +3,16 @@ module Strategies
     def initialize(instrument, interval: '5')
       @instrument = instrument
       @interval = interval
-      @series = CandleSeries.new(symbol: instrument.symbol, interval:)
+      @series = CandleSeries.new(symbol: instrument.symbol_name, interval:)
       raw = instrument.intraday_ohlc(interval: interval)
       @series.load_from_raw(raw)
     end
 
     def signal?
       # basic setup
-      @last = @series.last
-      @prev = @series[-2]
-      @third = @series[-3]
+      @last = @series.candles.last
+      @prev = @series.candles[-2]
+      @third = @series.candles[-3]
 
       bullish_pinbar? || bearish_engulfing? || breakout_candle?
     end
@@ -35,7 +35,7 @@ module Strategies
     end
 
     def breakout_candle?
-      highs = @series[-5..-2].map(&:high)
+      highs = @series.candles[-5..-2].map(&:high)
       @last.high > highs.max && @last.close > highs.max
     end
   end
