@@ -34,6 +34,7 @@ module Analysis
     end
 
     def extract_behaviour_data(strike, side)
+      pp @chain[:oc]
       data = @chain[:oc][format('%.6f', strike)][side.to_s]
       return {} unless data
 
