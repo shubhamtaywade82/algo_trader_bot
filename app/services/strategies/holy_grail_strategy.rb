@@ -1,89 +1,90 @@
 # frozen_string_literal: true
 
 module Strategies
-  class HolyGrailStrategy < ApplicationService
-    attr_reader :instrument, :series, :signal_components
+  class HolyGrailStrategy < BaseIndicatorStrategy
+    STRATEGIES = {
+      rsi_adx: Strategies::RsiAdxCombo,
+      macd_supertrend: Strategies::MacdSupertrend,
+      bollinger_rsi: Strategies::BollingerRsi,
+      donchian_adx: Strategies::DonchianAdx
+      # vwap_rsi: Strategies::VwapRsi,
+      # obv_macd: Strategies::ObvMacd
+    }.freeze
+
+    STRATEGY_WEIGHTS = {
+      rsi_adx: 0.15,
+      macd_supertrend: 0.2,
+      bollinger_rsi: 0.15,
+      donchian_adx: 0.15
+      # vwap_rsi: 0.15,
+      # obv_macd: 0.2
+    }.freeze
 
     def initialize(instrument, series: nil)
       @instrument = instrument
       @series = series || instrument.candles('5')
-      @signal_components = []
     end
 
     def call
-      analyze_indicators
-      analyze_smc
-      analyze_option_chain
+      results = run_all_strategies
 
-      total_score = signal_components.sum { _1[:score] }
-      result = classify_signal(total_score)
+      top_signal = results[:votes].max_by { |_signal, w| w }&.first || :hold
+      final_score = results[:score]
 
       {
-        symbol: instrument.symbol,
-        timestamp: Time.current,
-        result: result,
-        total_score: total_score,
-        components: signal_components,
-        action: %i[buy_ce buy_pe].include?(result) ? :trade : :hold,
-        sl: dynamic_stop_loss,
-        tp: dynamic_take_profit,
-        trail: dynamic_trailing_step
+        strategy: :holygrail,
+        instrument: instrument.symbol,
+        action: top_signal,
+        confidence: final_score.round(2),
+        reasons: results[:reasons],
+        telemetry: results[:telemetry],
+        decision: final_score >= 0.65 ? top_signal : :hold
       }
+    end
+
+    # ✨ AI Prompt Payload: use this output to pass to OpenAI
+    def ai_prompt_payload
+      result = call
+      <<~PROMPT.strip
+        Instrument: #{result[:instrument]}
+        Final Action: #{result[:action].to_s.upcase}
+        Confidence Score: #{result[:confidence]}%
+        Decision Reasoning:
+        #{result[:reasons].map { |r| "- #{r}" }.join("\n")}
+
+        Indicator Telemetry:
+        #{result[:telemetry].map { |k, v| "#{k.to_s.titleize}: #{v}" }.join("\n")}
+
+        Based on the above, analyze the current market structure, probable support/resistance zones, and possible close for today. If market is closed, prepare analysis for next session. Suggest any CE/PE trade or HOLD decision with SL/TP levels.
+      PROMPT
     end
 
     private
 
-    def analyze_indicators
-      [
-        Indicators::SupertrendSignal,
-        Indicators::RsiSignal,
-        Indicators::MacdSignal,
-        Indicators::AdxSignal
-      ].each do |klass|
-        signal_components << klass.call(series: series)
+    attr_reader :instrument, :series
+
+    def run_all_strategies
+      results = {
+        score: 0.0,
+        votes: Hash.new(0),
+        reasons: [],
+        telemetry: {}
+      }
+
+      STRATEGIES.each do |key, klass|
+        strat = klass.new(instrument, series: series)
+        outcome = strat.signal_details
+
+        next unless outcome
+
+        weight = STRATEGY_WEIGHTS[key]
+        results[:votes][outcome[:signal]] += weight
+        results[:score] += outcome[:confidence] * weight
+        results[:reasons] << "#{key.to_s.titleize} → #{outcome[:signal].to_s.upcase} (#{(outcome[:confidence] * weight).round(1)} pts)"
+        results[:telemetry][key] = outcome[:reason]
       end
-    end
 
-    def analyze_smc
-      [
-        SMC::Bos,
-        SMC::Choch
-      ].each do |klass|
-        signal_components << klass.call(series: series)
-      end
-    end
-
-    def analyze_option_chain
-      option_data = instrument.fetch_option_chain
-      oc_score = OptionChainAnalyzer.call(option_chain: option_data, spot: series.closes.last)
-      signal_components << oc_score if oc_score
-    end
-
-    def classify_signal(score)
-      if score >= 75 && series.supertrend_signal == :long_entry
-        :buy_ce
-      elsif score >= 75 && series.supertrend_signal == :short_entry
-        :buy_pe
-      else
-        :hold
-      end
-    end
-
-    def dynamic_stop_loss
-      atr = RubyTechnicalAnalysis::Atr.new(series: series.closes, period: 14).call.last
-      spot = series.closes.last
-      series.supertrend_signal == :long_entry ? spot - (2.5 * atr) : spot + (2.5 * atr)
-    end
-
-    def dynamic_take_profit
-      atr = RubyTechnicalAnalysis::Atr.new(series: series.closes, period: 14).call.last
-      spot = series.closes.last
-      series.supertrend_signal == :long_entry ? spot + (4 * atr) : spot - (4 * atr)
-    end
-
-    def dynamic_trailing_step
-      atr = RubyTechnicalAnalysis::Atr.new(series: series.closes, period: 14).call.last
-      atr * 0.5
+      results
     end
   end
 end

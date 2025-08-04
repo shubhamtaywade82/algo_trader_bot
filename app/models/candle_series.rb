@@ -154,7 +154,7 @@ class CandleSeries
   end
 
   def supertrend_signal
-    trend_line = Indicators::Supertrend.new(series: candles).call
+    trend_line = Indicators::Supertrend.new(series: self).call
     return nil if trend_line.empty?
 
     latest_close = closes.last
@@ -171,5 +171,28 @@ class CandleSeries
     curr = @candles[i]
     prev = @candles[i - 1]
     curr.high < prev.high && curr.low > prev.low
+  end
+
+  def bollinger_bands(period: 20)
+    return nil if candles.size < period
+
+    bb = RubyTechnicalAnalysis::BollingerBands.new(
+      series: closes,
+      period: period
+    ).call
+
+    { upper: bb[0], lower: bb[1], middle: bb[2] }
+  end
+
+  def donchian_channel(period: 20)
+    return nil if candles.size < period
+
+    dc = candles.each_with_index.map do |c, _i|
+      {
+        date_time: Time.zone.at(c.timestamp || 0),
+        value: c.close
+      }
+    end
+    TechnicalAnalysis::Dc.calculate(dc, period: period)
   end
 end

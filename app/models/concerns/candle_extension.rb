@@ -68,6 +68,37 @@ module CandleExtension
       cs&.liquidity_grab_down?
     end
 
+    def bollinger_bands(period: 20, interval: '5')
+      cs = candles(interval: interval)
+      return nil unless cs
+
+      cs.bollinger_bands(period: period)
+    end
+
+    def donchian_channel(period: 20, interval: '5')
+      cs = candles(interval: interval)
+
+      dc = cs.candles.each_with_index.map do |c, _i|
+        {
+          date_time: Time.zone.at(c.timestamp || 0), # <- NEW
+          value: c.close
+        }
+      end
+      TechnicalAnalysis::Dc.calculate(dc, period: period)
+    end
+
+    def obv(interval: '5')
+      dcv = candles(interval: interval).candles.each_with_index.map do |c, _i|
+        {
+          date_time: Time.zone.at(c.timestamp || 0), # <- NEW
+          close: c.close,
+          volume: c.volume || 0
+        }
+      end
+
+      TechnicalAnalysis::Obv.calculate(dcv)
+    end
+
     def candle_series(interval: '5')
       candles(interval: interval)
     end
