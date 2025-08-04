@@ -75,6 +75,9 @@ module InstrumentHelpers
   end
 
   def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil)
+    to_date ||= MarketCalendar.today_or_last_trading_day.to_s
+    from_date ||= (Date.parse(to_date) - 5).to_s # fetch last 5 sessions by default
+
     DhanHQ::Models::HistoricalData.intraday(
       security_id: security_id,
       exchange_segment: exchange_segment,
