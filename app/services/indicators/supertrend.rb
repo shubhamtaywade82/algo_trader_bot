@@ -1,9 +1,10 @@
 module Indicators
   class Supertrend < ApplicationService
-    attr_reader :series, :period, :multiplier, :supertrend_values
+    attr_reader :series, :period, :multiplier, :supertrend_values, :candles
 
     def initialize(series:, period: 10, multiplier: 3.0)
       @series = series
+      @candles = series.candles
       @period = period
       @multiplier = multiplier
       @supertrend_values = []
@@ -16,7 +17,7 @@ module Indicators
       supertrend = []
       trend = [] # :bullish or :bearish
 
-      series.each_with_index do |candle, i|
+      candles.each_with_index do |candle, i|
         next if i < period
 
         hl2 = (candle.high + candle.low) / 2.0
@@ -27,7 +28,7 @@ module Indicators
           supertrend[i] = upper_band
           trend[i] = :bearish
         else
-          prev_close = series[i - 1].close
+          prev_close = candles[i - 1].close
           prev_supertrend = supertrend[i - 1]
 
           if prev_close <= supertrend[i - 1]
@@ -51,11 +52,11 @@ module Indicators
       tr = []
       atr = []
 
-      series.each_with_index do |candle, i|
+      candles.each_with_index do |candle, i|
         if i.zero?
           tr[i] = candle.high - candle.low
         else
-          prev_close = series[i - 1].close
+          prev_close = candles[i - 1].close
           tr[i] = [
             candle.high - candle.low,
             (candle.high - prev_close).abs,
@@ -65,7 +66,7 @@ module Indicators
       end
 
       # Simple Moving Average for ATR
-      (0...series.size).each do |i|
+      (0...candles.size).each do |i|
         atr[i] = if i < period
                    nil
                  else

@@ -48,6 +48,21 @@ class CandleSeries
   def highs  = candles.map(&:high)
   def lows   = candles.map(&:low)
 
+  def hlc
+    candles.each_with_index.map do |c, _i|
+      {
+        date_time: Time.zone.at(c.timestamp || 0),
+        high: c.high,
+        low: c.low,
+        close: c.close
+      }
+    end
+  end
+
+  def atr(period = 14)
+    TechnicalAnalysis::Atr.calculate(hlc, period: period).first.atr
+  end
+
   def swing_high?(index, lookback = 2)
     return false if index < lookback || index + lookback >= candles.size
 

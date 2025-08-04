@@ -1,23 +1,24 @@
 # frozen_string_literal: true
 
 module Strategies
-  class SMCStrategy < ApplicationService
+  class SmcStrategy < ApplicationService
     def initialize(series:)
       @series = series
+      @candles = series.candles
       @score = 0
       @reasons = []
     end
 
     def call
-      return hold_signal('Not enough candles') if series.size < 50
+      return hold_signal('Not enough candles') if candles.size < 50
 
-      # Run all SMC indicators
-      bos     = SMC::Bos.call(series: series)
-      choch   = SMC::Choch.call(series: series)
-      order_blocks = SMC::OrderBlock.call(series: series)
-      fvg     = SMC::FairValueGap.call(series: series)
-      mitg    = SMC::Mitigation.call(series: series)
-      induc   = SMC::Inducement.call(series: series)
+      # Run all Smc indicators
+      bos     = Smc::Bos.call(series: series)
+      choch   = Smc::Choch.call(series: series)
+      order_blocks = Smc::OrderBlock.call(series: series)
+      fvg     = Smc::FairValueGap.call(series: series)
+      mitg    = Smc::Mitigation.call(series: series)
+      induc   = Smc::Inducement.call(series: series)
       grab_up = series.liquidity_grab_up?
       grab_dn = series.liquidity_grab_down?
 
@@ -41,16 +42,16 @@ module Strategies
                  end
         build_signal(action, confidence)
       else
-        hold_signal("Low SMC confidence: #{confidence}%")
+        hold_signal("Low Smc confidence: #{confidence}%")
       end
     rescue StandardError => e
-      notify_failure(e, 'SMCStrategy')
+      notify_failure(e, 'SmcStrategy')
       hold_signal("Exception: #{e.message}")
     end
 
     private
 
-    attr_reader :series, :score, :reasons
+    attr_reader :series, :score, :reasons, :candles
 
     def apply_score(name, result)
       return unless result
@@ -72,7 +73,7 @@ module Strategies
 
     def build_signal(action, confidence)
       {
-        strategy: :smc,
+        strategy: :Smc,
         action: action,
         confidence: confidence,
         reasons: reasons,
@@ -95,7 +96,7 @@ module Strategies
 
     def hold_signal(reason)
       {
-        strategy: :smc,
+        strategy: :Smc,
         action: :hold,
         confidence: score,
         reasons: reasons << reason
