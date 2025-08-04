@@ -4,12 +4,24 @@ module CandleExtension
 
   included do
     def candles(interval: '5')
-      raw_data = intraday_ohlc(interval: interval)
-      return nil unless raw_data
+      @ohlc_cache ||= {}
+      return @ohlc_cache[interval] if @ohlc_cache[interval] && !ohlc_stale?(interval)
 
-      series = CandleSeries.new(symbol: symbol_name, interval: interval)
-      series.load_from_raw(raw_data)
-      series
+      raw_data = intraday_ohlc(interval: interval)
+      return nil if raw_data.blank?
+
+      @ohlc_cache[interval] = CandleSeries.new(symbol: symbol_name, interval: interval).tap do |series|
+        series.load_from_raw(raw_data)
+      end
+    end
+
+    def ohlc_stale?(interval)
+      return true unless @last_ohlc_fetched
+
+      Time.current - (@last_ohlc_fetched[interval] ||= 1.hour.ago) > 5.minutes
+    ensure
+      @last_ohlc_fetched ||= {}
+      @last_ohlc_fetched[interval] = Time.current
     end
 
     def candle_series(interval: '5')

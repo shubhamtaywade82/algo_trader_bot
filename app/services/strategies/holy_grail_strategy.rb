@@ -33,7 +33,7 @@ module Strategies
 
       {
         strategy: :holygrail,
-        instrument: instrument.symbol,
+        instrument: instrument.symbol_name,
         action: top_signal,
         confidence: final_score.round(2),
         reasons: results[:reasons],

@@ -9,7 +9,7 @@
 project_dir=$(pwd)
 
 # Output file
-output_file="${project_dir}/algo_trading_api-code_context"
+output_file="${project_dir}/algo_trading_api-code_context.txt"
 
 # Remove the output file if it already exists
 if [ -f "$output_file" ]; then
