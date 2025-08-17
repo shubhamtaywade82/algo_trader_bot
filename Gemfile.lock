@@ -1,15 +1,18 @@
 GIT
   remote: https://github.com/shubhamtaywade82/dhanhq-client.git
-  revision: 96a1eea7ad59a9f38f70bec705539e7a5de32788
+  revision: 16ed2e8701640939143e7916f0a086f53165013a
   branch: main
   specs:
-    DhanHQ (0.1.3)
+    DhanHQ (2.0.0)
       activesupport
       base64
       bindata
+      concurrent-ruby
       dry-validation
+      eventmachine
       faraday
       faraday_middleware
+      faye-websocket
 
 GEM
   remote: https://rubygems.org/
@@ -160,6 +163,7 @@ GEM
     et-orbi (1.2.11)
       tzinfo
     event_stream_parser (1.0.0)
+    eventmachine (1.2.7)
     faraday (1.10.4)
       faraday-em_http (~> 1.0)
       faraday-em_synchrony (~> 1.0)
@@ -185,6 +189,9 @@ GEM
     faraday-retry (1.0.3)
     faraday_middleware (1.2.1)
       faraday (~> 1.0)
+    faye-websocket (0.12.0)
+      eventmachine (>= 0.12.0)
+      websocket-driver (>= 0.8.0)
     fugit (1.11.1)
       et-orbi (~> 1, >= 1.2.11)
       raabro (~> 1.4)
