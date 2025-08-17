@@ -68,6 +68,7 @@ end
 gem 'activerecord-import'
 gem 'csv', require: false
 gem 'daemons'
+gem 'delayed_job_active_record'
 gem 'ruby-openai'
 gem 'ruby-technical-analysis'
 gem 'technical-analysis'

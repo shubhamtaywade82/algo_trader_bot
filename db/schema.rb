@@ -10,9 +10,24 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2025_07_30_182124) do
+ActiveRecord::Schema[8.0].define(version: 2025_08_17_091258) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "delayed_jobs", force: :cascade do |t|
+    t.integer "priority", default: 0, null: false
+    t.integer "attempts", default: 0, null: false
+    t.text "handler", null: false
+    t.text "last_error"
+    t.datetime "run_at"
+    t.datetime "locked_at"
+    t.datetime "failed_at"
+    t.string "locked_by"
+    t.string "queue"
+    t.datetime "created_at"
+    t.datetime "updated_at"
+    t.index ["priority", "run_at"], name: "delayed_jobs_priority"
+  end
 
   create_table "derivatives", force: :cascade do |t|
     t.bigint "instrument_id", null: false
@@ -110,6 +125,19 @@ ActiveRecord::Schema[8.0].define(version: 2025_07_30_182124) do
     t.index ["security_id", "symbol_name", "exchange", "segment"], name: "index_instruments_unique", unique: true
     t.index ["symbol_name"], name: "index_instruments_on_symbol_name"
     t.index ["underlying_symbol", "expiry_date"], name: "index_instruments_on_underlying_symbol_and_expiry_date", where: "(underlying_symbol IS NOT NULL)"
+  end
+
+  create_table "scalp_sessions", force: :cascade do |t|
+    t.date "trade_date"
+    t.decimal "capital", precision: 12, scale: 2
+    t.decimal "max_day_loss", precision: 12, scale: 2
+    t.decimal "realized_pnl", precision: 12, scale: 2
+    t.decimal "equity_peak", precision: 12, scale: 2
+    t.integer "trades_count"
+    t.string "status"
+    t.jsonb "params"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
   end
 
   add_foreign_key "derivatives", "instruments"
