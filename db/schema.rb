@@ -128,14 +128,14 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_17_091258) do
   end
 
   create_table "scalp_sessions", force: :cascade do |t|
-    t.date "trade_date"
-    t.decimal "capital", precision: 12, scale: 2
-    t.decimal "max_day_loss", precision: 12, scale: 2
-    t.decimal "realized_pnl", precision: 12, scale: 2
-    t.decimal "equity_peak", precision: 12, scale: 2
-    t.integer "trades_count"
-    t.string "status"
-    t.jsonb "params"
+    t.date "trade_date", null: false
+    t.decimal "capital", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "max_day_loss", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "realized_pnl", precision: 12, scale: 2, default: "0.0", null: false
+    t.decimal "equity_peak", precision: 12, scale: 2, default: "0.0", null: false
+    t.integer "trades_count", default: 0, null: false
+    t.string "status", default: "idle", null: false
+    t.jsonb "params", default: {}, null: false
     t.datetime "created_at", null: false
     t.datetime "updated_at", null: false
   end

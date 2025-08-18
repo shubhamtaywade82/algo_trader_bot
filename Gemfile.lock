@@ -1,9 +1,9 @@
 GIT
   remote: https://github.com/shubhamtaywade82/dhanhq-client.git
-  revision: 16ed2e8701640939143e7916f0a086f53165013a
+  revision: 1510b7deaf822acf6fda2c3b1bbf978f105fd213
   branch: main
   specs:
-    DhanHQ (2.0.0)
+    DhanHQ (2.0.1)
       activesupport
       base64
       bindata

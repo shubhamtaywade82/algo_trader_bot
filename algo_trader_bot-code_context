@@ -13,6 +13,38 @@ class ApplicationJob < ActiveJob::Base
 end
 
 
+# File: app/jobs/scalp_session_runner_job.rb
+class ScalpSessionRunnerJob < ApplicationJob
+  queue_as :default
+
+  # Long-running job – ensure delayed_job timeout is high enough or disabled for this queue
+  def perform(date: Date.current, capital: 100000.0, max_day_loss: 3000.0, roster: %w[NIFTY BANKNIFTY], risk_rupees: 600.0)
+    session = ScalpSession.find_or_create_by!(trade_date: date) do |s|
+      s.capital      = capital
+      s.max_day_loss = max_day_loss
+      s.params = {
+        'risk_rupees' => risk_rupees,
+        'roster' => roster,
+        'profit_trigger_rupees' => 1000.0,
+        'no_entries_after' => '15:00'
+      }
+    end
+    Scalp::Runner.call(session: session)
+  end
+end
+
+# File: app/jobs/scalp_session_stop_job.rb
+class ScalpSessionStopJob < ApplicationJob
+  queue_as :default
+
+  def perform(date: Date.current)
+    if (session = ScalpSession.find_by(trade_date: date))
+      # simple signal: flip status → runner loop will see it
+      session.update!(status: :killed)
+    end
+  end
+end
+
 # File: app/mailers/application_mailer.rb
 class ApplicationMailer < ActionMailer::Base
   default from: 'from@example.com'
@@ -250,12 +282,24 @@ module CandleExtension
 
   included do
     def candles(interval: '5')
-      raw_data = intraday_ohlc(interval: interval)
-      return nil unless raw_data
+      @ohlc_cache ||= {}
+      return @ohlc_cache[interval] if @ohlc_cache[interval] && !ohlc_stale?(interval)
 
-      series = CandleSeries.new(symbol: symbol_name, interval: interval)
-      series.load_from_raw(raw_data)
-      series
+      raw_data = intraday_ohlc(interval: interval)
+      return nil if raw_data.blank?
+
+      @ohlc_cache[interval] = CandleSeries.new(symbol: symbol_name, interval: interval).tap do |series|
+        series.load_from_raw(raw_data)
+      end
+    end
+
+    def ohlc_stale?(interval)
+      return true unless @last_ohlc_fetched
+
+      Time.current - (@last_ohlc_fetched[interval] ||= 1.hour.ago) > 5.minutes
+    ensure
+      @last_ohlc_fetched ||= {}
+      @last_ohlc_fetched[interval] = Time.current
     end
 
     def candle_series(interval: '5')
@@ -591,6 +635,19 @@ class Instrument < ApplicationRecord
 end
 
 
+# File: app/models/scalp_session.rb
+class ScalpSession < ApplicationRecord
+  enum :status, { idle: 'idle', running: 'running', stopped: 'stopped', killed: 'killed' }
+
+  validates :trade_date, presence: true
+  validates :capital, :max_day_loss, :realized_pnl, :equity_peak, numericality: true
+
+  def equity
+    capital + realized_pnl
+  end
+end
+
+
 # File: app/services/algo_runner.rb
 class AlgoRunner
   def self.execute_all
@@ -729,6 +786,122 @@ module Execution
       )
 
       order.save
+    end
+  end
+end
+
+# File: app/services/execution/position_guard.rb
+module Execution
+  class PositionGuard
+    TICK_INTERVAL_MS = 200 # safety if you rate-limit checks
+
+    PositionState = Struct.new(
+      :security_id, :segment, :entry_price, :peak_price, :entered_at,
+      :trailing_mode, :underlying_symbol, :last_underlying_high_ts, :last_underlying_high
+    )
+
+    class << self
+      def start(budget)
+        @budget = budget
+        @states = {}
+        @mutex  = Mutex.new
+        @running = true
+        boot_ws_handlers
+      end
+
+      def stop
+        @running = false
+      end
+
+      def register_intent(intent)
+        state = PositionState.new(
+          intent.security_id,
+          intent.exchange_segment,
+          BigDecimal(intent.entry_price.to_s),
+          BigDecimal(intent.entry_price.to_s),
+          Time.current,
+          false,
+          intent.underlying_symbol,
+          Time.current,
+          nil
+        )
+        @mutex.synchronize { @states[key(intent)] = state }
+      end
+
+      private
+
+      def key(intent_or_state)
+        "#{intent_or_state.segment}:#{intent_or_state.security_id}"
+      end
+
+      def boot_ws_handlers
+        # Hook into your WS tick stream
+        DhanHQ::WS::Bus.on_tick do |tick|
+          next unless @running
+
+          handle_tick(tick)
+        end
+      end
+
+      def handle_tick(tick)
+        k = "#{tick.segment}:#{tick.security_id}"
+        state = @states[k]
+        return unless state
+
+        ltp = BigDecimal(tick.ltp.to_s)
+        return if ltp <= 0
+
+        # Peak tracking
+        state.peak_price = [state.peak_price, ltp].max
+
+        # Flip to trailing mode once profit exceeds max(1%, ₹1000)
+        profit_pct = (ltp - state.entry_price) / state.entry_price
+        if !state.trailing_mode && (profit_pct >= 0.01 || (ltp - state.entry_price) * lot_size_for(state) >= @budget.profit_trigger_rupees)
+          state.trailing_mode = true
+        end
+
+        # Hard SL: 10% from entry
+        if ltp <= state.entry_price * BigDecimal('0.90')
+          exit_and_finalize!(state, reason: :hard_sl)
+          return
+        end
+
+        # Time stop: 3 minutes and not green
+        if Time.current - state.entered_at >= 3.minutes && ltp <= state.entry_price
+          exit_and_finalize!(state, reason: :time_stop)
+          return
+        end
+
+        # Trailing exit: 1% drop from peak once trailing_mode
+        return unless state.trailing_mode && ltp <= state.peak_price * BigDecimal('0.99')
+
+        exit_and_finalize!(state, reason: :trail_hit)
+        nil
+
+        # Optional: consolidation on underlying (update via separate underlying feed)
+        # if no new underlying high for 2+ bars, consider exit
+        # Pseudocode placeholders:
+        # if underlying_consolidating?(state.underlying_symbol)
+        #   exit_and_finalize!(state, reason: :underlying_consolidation)
+        # end
+      end
+
+      def lot_size_for(state)
+        # Look up derivative by security_id if needed; fallback 1
+        Derivative.find_by(security_id: state.security_id)&.lot_size.to_i.nonzero? || 1
+      end
+
+      def exit_and_finalize!(state, reason:)
+        # If super order placed → modify/cancel bracket; else market exit
+        Orders::Manager.exit_position!(security_id: state.security_id, segment: state.segment, reason: reason)
+        # Compute realized_pnl from broker or internal calc
+        realized = Orders::Analyzer.realized_pnl_for(state.security_id, state.segment) # returns decimal ₹
+        @budget.on_trade_closed!(realized_pnl: realized)
+        @mutex.synchronize { @states.delete("#{state.segment}:#{state.security_id}") }
+        CloseStrikesManager.unsubscribe_if_unused(state.security_id, state.segment)
+      rescue StandardError => e
+        Rails.logger.error("[PositionGuard] exit failed #{state.inspect} #{e.class}: #{e.message}")
+      end
     end
   end
 end
@@ -1286,6 +1459,14 @@ class InstrumentsImporter
   end
 end
 
+# File: app/services/live/tick_cache.rb
+class TickCache
+  MAP = Concurrent::Map.new
+  def self.put(t) = MAP["#{t[:segment]}:#{t[:security_id]}"] = t
+  def self.get(seg, sid) = MAP["#{seg}:#{sid}"]
+  def self.ltp(seg, sid) = get(seg, sid)&.dig(:ltp)
+end
+
 # File: app/services/market_calendar.rb
 module MarketCalendar
   MARKET_HOLIDAYS = [
@@ -1373,6 +1554,391 @@ end
 
 # File: app/services/option/chain_analyzer.rb
 
+
+# File: app/services/scalp/budget.rb
+module Scalp
+  class Budget
+    def initialize(session)
+      @session = session
+      @allow_entries = true
+      @mutex = Mutex.new
+    end
+
+    def on_trade_closed!(realized_pnl:)
+      @mutex.synchronize do
+        @session.increment!(:realized_pnl, realized_pnl)
+      end
+    end
+
+    def can_trade?
+      @allow_entries && !daily_loss_hit?
+    end
+
+    def block_new_entries!
+      @allow_entries = false
+    end
+
+    def daily_loss_hit?
+      @session.realized_pnl <= -@session.max_day_loss
+    end
+
+    def risk_rupees
+      BigDecimal(@session.params['risk_rupees'].to_s.presence || '600.0')
+    end
+
+    def profit_trigger_rupees
+      BigDecimal(@session.params['profit_trigger_rupees'].to_s.presence || '1000.0')
+    end
+
+    def no_entries_after # "15:00" default
+      (@session.params['no_entries_after'] || '15:00').to_s
+    end
+
+    def roster
+      Array(@session.params['roster']).presence || %w[NIFTY BANKNIFTY]
+    end
+  end
+end
+
+# File: app/services/scalp/close_strikes_manager.rb
+module Scalp
+  class CloseStrikesManager
+    class << self
+      def start(roster)
+        @mutex ||= Mutex.new
+        @started = true
+        @subscribed = Set.new # holds "SEGMENT:SECURITY_ID" keys
+        @roster = Array(roster)
+
+        # subscribe underlyings up front (indices/stocks)
+        @roster.each { |symbol| subscribe_underlying!(symbol) }
+      rescue StandardError => e
+        Rails.logger.error("[CloseStrikesManager] start failed: #{e.class}: #{e.message}")
+      end
+
+      def stop
+        @started = false
+        # Optional: perform a bulk UNSUB here if you want to clean everything
+        # unsubscribe_all!
+      rescue StandardError => e
+        Rails.logger.error("[CloseStrikesManager] stop failed: #{e.class}: #{e.message}")
+      end
+
+      # Subscribe option legs for a given symbol (e.g., ATM ± 1)
+      # Pass an array of [segment, security_id] pairs or Derivative records.
+      def subscribe_legs!(legs)
+        return unless @started
+
+        pairs = normalize_pairs(legs)
+        with_client do |client|
+          to_add = filter_new(pairs)
+          chunked(to_add, 90).each do |batch|
+            client.subscribe_many(:quote, batch) # or :full if you want depth/OI
+            mark_subscribed(batch)
+          rescue StandardError => e
+            Rails.logger.warn("[CloseStrikesManager] subscribe_many failed: #{e.class}: #{e.message}")
+          end
+        end
+      end
+
+      # Called by PositionGuard after exit; real impl can ref-count and UNSUB.
+      def unsubscribe_if_unused(segment, security_id)
+        # Optional: track refs per leg and UNSUB when count goes zero.
+        # For now, we keep them subscribed; DhanHQ allows <=100 per frame and
+        # we aim to stay within that via focused ATM±1 usage.
+        true
+      end
+
+      # Convenience for subscribing a single leg (Derivative or [seg, id])
+      def subscribe_leg!(leg)
+        subscribe_legs!([leg])
+      end
+
+      private
+
+      # Subscribe the underlying itself so we can watch spot drift if desired
+      def subscribe_underlying!(symbol)
+        inst = Instrument.find_by(symbol: symbol) || Instrument.find_by(tradingsymbol: symbol)
+        return unless inst
+
+        segment = inst.exchange_segment # e.g., "NSE_FNO" for index futures; adjust per your mapping
+        sec_id  = inst.security_id
+        return unless segment.present? && sec_id.present?
+
+        subscribe_legs!([[segment, sec_id]])
+      end
+
+      def with_client
+        # Try to get the running WS client from your supervisor or directly:
+        client = (WSSupervisor.respond_to?(:client) && WSSupervisor.client) ||
+                 (defined?(DhanHQ::WS::Client) && DhanHQ::WS::Client.try(:current)) ||
+                 (defined?(DhanHQ::WS::Client) && DhanHQ::WS::Client.try(:instance))
+
+        unless client
+          Rails.logger.warn('[CloseStrikesManager] WS client not available yet')
+          return
+        end
+        yield client
+      end
+
+      def normalize_pairs(legs)
+        legs.filter_map do |leg|
+          case leg
+          when Array
+            seg, id = leg
+            next unless seg && id
+
+            [seg.to_s, id.to_i]
+          else
+            # treat as Derivative or a PORO responding to segment/security_id
+            seg = leg.respond_to?(:exchange_segment) ? leg.exchange_segment : leg.segment
+            id  = leg.respond_to?(:security_id) ? leg.security_id : leg.id
+            next unless seg && id
+
+            [seg.to_s, id.to_i]
+          end
+        end
+      end
+
+      def filter_new(pairs)
+        @mutex.synchronize do
+          pairs.reject { |seg, id| @subscribed.include?("#{seg}:#{id}") }
+        end
+      end
+
+      def mark_subscribed(pairs)
+        @mutex.synchronize do
+          pairs.each { |seg, id| @subscribed.add("#{seg}:#{id}") }
+        end
+      end
+
+      def chunked(arr, size)
+        arr.each_slice(size).to_a
+      end
+
+      # If you later implement hard UNSUB:
+      # def unsubscribe_all!
+      #   with_client do |client|
+      #     keys = @mutex.synchronize { @subscribed.to_a }
+      #     pairs = keys.map { |k| seg, id = k.split(":"); [seg, id.to_i] }
+      #     chunked(pairs, 90).each { |batch| client.unsubscribe_many(:quote, batch) }
+      #   end
+      #   @mutex.synchronize { @subscribed.clear }
+      # end
+    end
+  end
+end
+
+# File: app/services/scalp/control.rb
+module Scalp
+  class Control
+    def self.kill_today!(reason: 'manual')
+      session = ScalpSession.find_by(trade_date: Date.current)
+      session&.update!(status: :killed, params: session.params.merge(kill_reason: reason))
+    end
+
+    def self.stop_today!
+      session = ScalpSession.find_by(trade_date: Date.current)
+      session&.update!(status: :stopped)
+    end
+  end
+end
+
+# File: app/services/scalp/roster.rb
+module Scalp
+  class Roster
+    def self.list(session)
+      Array(session.params['roster']).presence || %w[NIFTY BANKNIFTY]
+    end
+  end
+end
+
+# File: app/services/scalp/rules.rb
+module Scalp
+  class Rules
+    # candles => your CandleSeries for 1m
+    # Expect: supertrend(direction: :up|:down), rsi(14), adx(14)
+    def self.entry_signal(symbol, candles)
+      st  = candles.supertrend(factor: 2.0, period: 10)
+      rsi = candles.rsi(14).last
+      adx = candles.adx(14).last
+      dir = st.direction # :up or :down at last bar
+
+      return nil unless adx && adx > 25
+
+      if dir == :up && rsi && rsi > 50
+        OpenStruct.new(direction: :bullish)
+      elsif dir == :down && rsi && rsi < 50
+        OpenStruct.new(direction: :bearish)
+      end
+    end
+  end
+end
+
+# File: app/services/scalp/runner.rb
+module Scalp
+  class Runner < ApplicationService
+    def initialize(session:)
+      @session = session
+      @running = true
+    end
+
+    def call
+      @session.update!(status: :running, equity_peak: @session.equity)
+      boot!
+
+      loop do
+        break unless @running
+
+        enforce_time_window!
+        enforce_kill_switch!
+        sleep 1
+      end
+    ensure
+      shutdown!
+    end
+
+    def stop!
+      @running = false
+    end
+
+    private
+
+    def boot!
+      Time.use_zone('Asia/Kolkata') {}
+      @budget = Budget.new(@session)
+
+      Scalp::WSSupervisor.start(mode: :quote)
+      CloseStrikesManager.start(Scalp::Roster.list(@session))
+      Execution::PositionGuard.start(@budget)
+
+      # 1-minute entries across roster
+      Bars::FetchLoop.start(timeframe: '1m', symbols: Scalp::Roster.list(@session)) do |symbol, candles|
+        next unless in_entry_window? && @budget.can_trade?
+
+        signal = Rules.entry_signal(symbol, candles)
+        next unless signal
+
+        leg   = Strategy::OptionLocator.new(symbol).atm_leg_for(signal.direction) # CE for :bullish, PE for :bearish
+        entry = Scalp::Sizing.for(leg, budget: @budget)
+        next if entry.qty <= 0
+
+        intent = Execution::DhanRouter.place_super_order!(leg, entry) # super order or fallback path
+        Execution::PositionGuard.register_intent(intent)
+        @session.increment!(:trades_count)
+      end
+    end
+
+    def in_entry_window?
+      now = Time.current.in_time_zone('Asia/Kolkata')
+      cutoff = @budget.no_entries_after
+      now < now.change(hour: cutoff.split(':')[0].to_i, min: cutoff.split(':')[1].to_i)
+    end
+
+    def enforce_time_window!
+      now = Time.current.in_time_zone('Asia/Kolkata')
+      return unless now >= now.change(hour: 15, min: 25)
+
+      stop!
+    end
+
+    def enforce_kill_switch!
+      @session.reload
+      @session.update!(equity_peak: [@session.equity_peak, @session.equity].max)
+      stop! if @budget.daily_loss_hit?
+    end
+
+    def shutdown!
+      Execution::PositionGuard.stop
+      CloseStrikesManager.stop
+      WSSupervisor.stop
+      Bars::FetchLoop.stop
+      @session.update!(status: :stopped) if @session.running?
+    end
+  end
+end
+
+# File: app/services/scalp/sizing.rb
+module Scalp
+  class Sizing
+    # derivative must respond to lot_size and ltp
+    def self.for(derivative, budget:, sl_pct: BigDecimal('0.10'))
+      lot_size    = derivative.lot_size.to_i
+      entry_price = BigDecimal(derivative.ltp.to_s)
+      risk        = budget.risk_rupees
+
+      return OpenStruct.new(qty: 0, sl_pct: sl_pct) if entry_price <= 0 || lot_size <= 0
+
+      lots = (risk / (entry_price * sl_pct * lot_size)).floor
+      qty  = [lots, 1].max * lot_size
+      OpenStruct.new(qty: qty, sl_pct: sl_pct)
+    end
+  end
+end
+
+# File: app/services/scalp/ws_supervisor.rb
+# frozen_string_literal: true
+
+module Scalp
+  class WSSupervisor
+    def initialize(indices:, mode: :quote)
+      @mode = mode
+      @indices = indices
+      @bus = TickBus.new
+      @agg = CandleAggregator.new(interval_sec: 300) { |ev| on_candle_close(ev) }
+      @running = Concurrent::AtomicBoolean.new(false)
+    end
+    attr_reader :agg
+
+    def start!
+      return if @running.true?
+
+      @running.make_true
+
+      # seed 5m series for indices (from your Instrument helpers)
+      @indices.each do |it|
+        inst = Instrument.find_by(security_id: it[:security_id].to_s)
+        next unless inst
+
+        cs = inst.candle_series(interval: '5') || CandleSeries.new(symbol: inst.symbol, interval: '5')
+        @agg.seed_series!(segment: it[:segment], security_id: it[:security_id], series: cs)
+      end
+
+      @ws = DhanHQ::WS::Client.new(mode: @mode).start
+      @ws.on(:tick) { |t| on_tick(t) }
+      @indices.each { |i| @ws.subscribe_one(segment: i[:segment], security_id: i[:security_id]) }
+
+      @drainer = Thread.new do
+        loop do
+          @bus.drain
+          sleep 0.01 if @running.true?
+        end
+      end
+      self
+    end
+
+    def stop!
+      @running.make_false
+      @ws&.stop
+      @drainer&.kill
+    end
+
+    def subscribe_option(seg:, sid:) = @ws.subscribe_one(segment: seg, security_id: sid)
+
+    private
+
+    def on_tick(t)
+      TickCache.put(t)
+      @bus.publish("ticks.#{t[:segment]}.#{t[:security_id]}", t)
+      @agg.on_tick(t)
+      CloseStrikesManager.instance.on_index_tick(t) # dynamic close strikes
+    end
+
+    def on_candle_close(ev)
+      Strategy::SupertrendOptionLong.instance.on_index_candle(ev[:segment], ev[:security_id])
+    end
+  end
+end
 
 # File: app/services/smc/bos.rb
 # SMC Component: Break of Structure (BOS)
@@ -1780,7 +2346,7 @@ module Strategies
 
       {
         strategy: :holygrail,
-        instrument: instrument.symbol,
+        instrument: instrument.symbol_name,
         action: top_signal,
         confidence: final_score.round(2),
         reasons: results[:reasons],
