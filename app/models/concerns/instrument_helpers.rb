@@ -74,9 +74,9 @@ module InstrumentHelpers
     nil
   end
 
-  def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil)
+  def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil, days: 90)
     to_date ||= MarketCalendar.today_or_last_trading_day.to_s
-    from_date ||= (Date.parse(to_date) - 5).to_s # fetch last 5 sessions by default
+    from_date ||= (Date.parse(to_date) - days).to_s # fetch last 5 sessions by default
 
     DhanHQ::Models::HistoricalData.intraday(
       security_id: security_id,
@@ -84,7 +84,7 @@ module InstrumentHelpers
       instrument: instrument_type,
       interval: interval,
       oi: oi,
-      from_date: from_date || (Time.zone.today - 90).to_s,
+      from_date: from_date || (Time.zone.today - days).to_s,
       to_date: to_date || (Time.zone.today - 1).to_s
     )
   rescue StandardError => e
