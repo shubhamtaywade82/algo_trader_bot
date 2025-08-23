@@ -27,4 +27,3 @@ module Mtf
     end
   end
 end
-v

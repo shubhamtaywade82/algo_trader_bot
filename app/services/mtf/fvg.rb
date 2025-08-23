@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 module Mtf
-  class FVG
+  class Fvg
     Gap = Struct.new(:dir, :i, :hi, :lo, keyword_init: true) # dir :up/:down, i = middle bar index
 
-    # Classic 3-candle FVG:
+    # Classic 3-candle Fvg:
     #  up: low[i+1] > high[i-1]
     # down: high[i+1] < low[i-1]
     def self.scan(series, lookback: 30)

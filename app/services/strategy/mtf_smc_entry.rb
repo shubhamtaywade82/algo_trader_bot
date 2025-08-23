@@ -18,19 +18,19 @@ module Strategy
       Rails.logger.debug { "#{instrument.symbol_name}: #{bias}" }
       return nil if bias == :none
 
-      # 1H: Trend + BOS or CHOCH near OB/FVG/liquidity
+      # 1H: Trend + BOS or CHOCH near OB/Fvg/liquidity
       h1_trend = Mtf::Structure.trend(s.h1, lookback: 6)
       bos      = Mtf::Structure.bos(s.h1, dir: (bias == :bullish ? :up : :down))
       choch    = Mtf::Structure.choch(s.h1, prior_dir: (bias == :bullish ? :down : :up))
       ob_zone  = Mtf::OrderBlock.last_before_bos(s.h1, bos)
-      fvg_list = Mtf::FVG.scan(s.h1, lookback: 40)
+      fvg_list = Mtf::Fvg.scan(s.h1, lookback: 40)
       pools    = (bias == :bullish ? Mtf::Liquidity.equal_lows(s.h1) : Mtf::Liquidity.equal_highs(s.h1))
 
       # Require context alignment: trend or BOS/CHOCH in bias direction
       aligned = (h1_trend == (bias == :bullish ? :up : :down)) || bos || choch
       return nil unless aligned
 
-      # 15m: Confirmation (BOS + pullback to OB/FVG or reaction at liquidity)
+      # 15m: Confirmation (BOS + pullback to OB/Fvg or reaction at liquidity)
       m15_bos = Mtf::Structure.bos(s.m15, dir: (bias == :bullish ? :up : :down))
       return nil unless m15_bos
 
@@ -38,7 +38,7 @@ module Strategy
       confirm =
         if ob_zone && Mtf::OrderBlock.price_touches?(ob_zone, last_price)
           :ob_touch
-        elsif (gap = fvg_list.last) && Mtf::FVG.price_in_gap?(gap, last_price)
+        elsif (gap = fvg_list.last) && Mtf::Fvg.price_in_gap?(gap, last_price)
           :fvg_retrace
         elsif (pool = pools.last) && ((bias == :bullish && last_price >= pool.level) || (bias == :bearish && last_price <= pool.level))
           :liquidity_sweep
