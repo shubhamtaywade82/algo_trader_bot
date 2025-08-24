@@ -1,54 +1,47 @@
-# app/services/orders/executor.rb
+# frozen_string_literal: true
+
 module Orders
   class Executor < ApplicationService
-    def initialize(instrument:, side:, qty:, entry_type:, risk_params:, client_ref:, entry_price: nil)
-      @instrument = instrument
-      @side = side
-      @qty = qty
-      @entry_type = entry_type
-      @risk_params = risk_params
-      @client_ref = client_ref
-      @entry_price = entry_price
-    end
+    # Places a Super Order and records a snapshot in the in-memory cache.
+    def self.place_super!(instrument:, qty:, side:, sl:, tp:, trail:, client_ref:, entry_price: nil)
+      params = Orders::SuperParamsBuilder.call(
+        instrument: instrument,
+        side: :buy,
+        qty: qty,
+        entry_type: :market,
+        entry_price: entry_price,
+        sl_value: sl,
+        tp_value: tp,
+        trail_sl_value: trail,
+        trail_sl_jump: trail,
+        client_ref: client_ref
+      )
 
-    def call
-      guard = Risk::Guard.new
-      raise 'Trading disabled' unless guard.trading_enabled?
+      resp = if ENV['PLACE_ORDER'] == 'true'
+               DhanHQ::SuperOrders.place(params)
+             else
+               { 'orderId' => "DRY-#{Time.now.to_i}" }
+             end
+      super_ref = resp['orderId'].to_s
 
-      PgLocks.with_lock("super:#{@instrument.id}") do
-        return Order.find_by(client_ref: @client_ref) if Order.exists?(client_ref: @client_ref)
+      snapshot = {
+        super_ref: super_ref,
+        client_ref: client_ref,
+        seg: instrument.exchange_segment,
+        sid: instrument.security_id.to_s,
+        cp: side.to_s.upcase,
+        qty: qty,
+        entry_price: params[:price] || Live::TickCache.ltp(instrument.exchange_segment, instrument.security_id),
+        sl_value: params[:sl_value],
+        tp_value: params[:tp_value],
+        trail_sl_value: params[:trail_sl_value],
+        placed_at: Time.now.utc.iso8601,
+        status: 'OPEN'
+      }
 
-        params = Orders::SuperParamsBuilder.call(
-          instrument: @instrument,
-          side: @side,
-          qty: @qty,
-          entry_type: @entry_type,
-          entry_price: @entry_price,
-          sl_value: @risk_params[:sl_value],
-          tp_value: @risk_params[:tp_value],
-          trail_sl_value: @risk_params[:trail_sl_value],
-          trail_sl_jump: @risk_params[:trail_sl_jump],
-          client_ref: @client_ref
-        )
-
-        # Your gem call — adjust to your method signature / return shape
-        # Expected resp fields: :super_order_id, :avg_price (if provided by broker immediately)
-        resp = DhanHQ::SuperOrders.place(params)
-
-        Order.create!(
-          instrument_id: @instrument.id,
-          side: @side,
-          qty: @qty,
-          entry_type: Order.entry_types[@entry_type.to_s],
-          client_ref: @client_ref,
-          super_ref: resp[:super_order_id],
-          super_status: :submitted,
-          sl_value: params[:sl_value],
-          tp_value: params[:tp_value],
-          trail_sl_value: params[:trail_sl_value],
-          entry_price: resp[:avg_price]
-        )
-      end
+      State::OrderCache.put!(super_ref, snapshot)
+      State::Events.log(type: :order_placed, data: snapshot)
+      snapshot
     end
   end
 end

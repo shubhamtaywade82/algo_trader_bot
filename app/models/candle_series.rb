@@ -14,10 +14,15 @@ class CandleSeries
 
   def load_from_raw(response)
     normalise_candles(response).each do |row|
+      ts = row[:timestamp]
+      ts = Time.zone.at(ts) if ts.is_a?(Numeric)
+
       @candles << Candle.new(
-        ts: Time.zone.parse(row[:timestamp].to_s),
-        open: row[:open], high: row[:high],
-        low: row[:low], close: row[:close],
+        ts: ts,
+        open: row[:open],
+        high: row[:high],
+        low: row[:low],
+        close: row[:close],
         volume: row[:volume]
       )
     end
@@ -40,6 +45,39 @@ class CandleSeries
         timestamp: Time.zone.at(resp['timestamp'][i]),
         volume: resp['volume'][i].to_i
       }
+    end
+  end
+
+  private
+
+  # Normalises a single candle entry which may be provided either as a Hash
+  # with symbol/string keys or as an Array in the order:
+  # [timestamp, open, high, low, close, volume].
+  def slice_candle(candle)
+    if candle.is_a?(Hash)
+      ts = candle[:timestamp] || candle['timestamp']
+      ts = Time.zone.at(ts) if ts.is_a?(Numeric)
+      {
+        open: (candle[:open] || candle['open']).to_f,
+        close: (candle[:close] || candle['close']).to_f,
+        high: (candle[:high] || candle['high']).to_f,
+        low: (candle[:low] || candle['low']).to_f,
+        timestamp: ts,
+        volume: (candle[:volume] || candle['volume'] || 0).to_i
+      }
+    elsif candle.respond_to?(:[]) && candle.size >= 6
+      ts = candle[0]
+      ts = Time.zone.at(ts) if ts.is_a?(Numeric)
+      {
+        timestamp: ts,
+        open: candle[1].to_f,
+        high: candle[2].to_f,
+        low: candle[3].to_f,
+        close: candle[4].to_f,
+        volume: (candle[5] || 0).to_i
+      }
+    else
+      raise "Unexpected candle format: #{candle.inspect}"
     end
   end
 

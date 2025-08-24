@@ -100,7 +100,10 @@ module CandleExtension
     end
 
     def obv(interval: '5')
-      dcv = candles(interval: interval).candles.each_with_index.map do |c, _i|
+      cs = candles(interval: interval)
+      return nil unless cs
+
+      dcv = cs.candles.each_with_index.map do |c, _i|
         {
           date_time: Time.zone.at(c.timestamp || 0), # <- NEW
           close: c.close,
@@ -109,10 +112,6 @@ module CandleExtension
       end
 
       TechnicalAnalysis::Obv.calculate(dcv)
-    end
-
-    def candle_series(interval: '5')
-      candles(interval: interval)
     end
   end
 end

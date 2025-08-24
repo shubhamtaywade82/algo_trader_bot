@@ -25,11 +25,15 @@ module Indicators
     end
 
     def bullish_signal?
-      rsi < 30 && adx > 20 && series.closes.last > series.closes[-2]
+      return false if @series.closes.size < 2
+
+      rsi < 30 && adx > 20 && @series.closes.last > @series.closes[-2]
     end
 
     def bearish_signal?
-      rsi > 70 && adx > 20 && series.closes.last < series.closes[-2]
+      return false if @series.closes.size < 2
+
+      rsi > 70 && adx > 20 && @series.closes.last < @series.closes[-2]
     end
   end
 end
