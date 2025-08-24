@@ -43,6 +43,35 @@ class CandleSeries
     end
   end
 
+  private
+
+  # Normalises a single candle entry which may be provided either as a Hash
+  # with symbol/string keys or as an Array in the order:
+  # [timestamp, open, high, low, close, volume].
+  def slice_candle(candle)
+    if candle.is_a?(Hash)
+      {
+        open: candle[:open] || candle['open'],
+        close: candle[:close] || candle['close'],
+        high: candle[:high] || candle['high'],
+        low: candle[:low] || candle['low'],
+        timestamp: candle[:timestamp] || candle['timestamp'],
+        volume: candle[:volume] || candle['volume'] || 0
+      }
+    elsif candle.respond_to?(:[]) && candle.size >= 6
+      {
+        timestamp: candle[0],
+        open: candle[1],
+        high: candle[2],
+        low: candle[3],
+        close: candle[4],
+        volume: candle[5]
+      }
+    else
+      raise "Unexpected candle format: #{candle.inspect}"
+    end
+  end
+
   def opens  = candles.map(&:open)
   def closes = candles.map(&:close)
   def highs  = candles.map(&:high)
