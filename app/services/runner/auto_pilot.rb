@@ -76,7 +76,7 @@ module Runner
 
       side = (trend == :up ? :ce : :pe)
       leg  = Options::ChainAnalyzer.call(underlying: inst, side: side, config: { strategy_type: (@mode.scalp ? 'intraday' : 'intraday') })
-      return unless leg && leg[:ltp].to_f > 0
+      return unless leg && leg[:ltp].to_f.positive?
 
       # Budget/guard: 30% capital per trade; expect ~1R equal to 10% of premium baseline
       qty = leg[:lot_size].to_i
@@ -101,14 +101,14 @@ module Runner
       rescue StandardError
         nil
       end
-      atr_pct = if atr && (c = series.closes.last).to_f > 0
-                  atr.to_f / c.to_f
+      atr_pct = if atr && (c = series.closes.last).to_f.positive?
+                  atr.to_f / c
                 end
 
-      if atr_pct && atr_pct > 0
-        sl_pct    = [[atr_pct * 2.0, 0.05].max, 0.18].min
-        tp_pct    = [[atr_pct * 4.0, 0.10].max, 0.40].min
-        trail_pct = [[atr_pct, 0.03].max, 0.12].min
+      if atr_pct&.positive?
+        sl_pct    = (atr_pct * 2.0).clamp(0.05, 0.18)
+        tp_pct    = (atr_pct * 4.0).clamp(0.10, 0.40)
+        trail_pct = atr_pct.clamp(0.03, 0.12)
       else
         sl_pct = 0.10
         tp_pct = 0.20

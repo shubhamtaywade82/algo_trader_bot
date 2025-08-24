@@ -27,7 +27,6 @@ module Scalp
     private
 
     def boot!
-      Time.use_zone('Asia/Kolkata') {}
       @budget = Budget.new(@session)
 
       Scalp::WSSupervisor.start(mode: :quote)
