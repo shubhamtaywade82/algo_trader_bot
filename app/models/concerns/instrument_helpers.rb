@@ -51,6 +51,18 @@ module InstrumentHelpers
     nil
   end
 
+  def subscribe_params
+    { ExchangeSegment: exchange_segment, SecurityId: security_id.to_s }
+  end
+
+  def ws_get
+    Live::TickCache.get(exchange_segment, security_id.to_s)
+  end
+
+  def ws_ltp
+    ws_get&.dig(:ltp)
+  end
+
   def ohlc
     response = DhanHQ::Models::MarketFeed.ohlc(exch_segment_enum)
     response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil

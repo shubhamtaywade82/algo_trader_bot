@@ -27,8 +27,6 @@ module Runner
 
             next if sizing.qty <= 0 || !budget.can_trade?
 
-            pp leg
-            pp sizing
             # # place order
             # intent = Execution::DhanRouter.place_super_order!(leg, sizing)
 

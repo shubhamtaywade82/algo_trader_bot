@@ -1,6 +1,6 @@
 module Risk
   class Guard
-    DEFAULT_MAX_TICK_AGE = 3 # seconds
+    DEFAULT_MAX_TICK_AGE = 5 # seconds
 
     def trading_enabled?
       Setting.fetch_bool('trading_enabled', true)
@@ -24,12 +24,22 @@ module Risk
     # expected_risk_rupees: how much you'd risk if this entry is placed (use per_trade_risk_rupees)
     # seg/sid: instrument identifiers for staleness check
     def entry_allowed?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
-      return [false, 'trading_disabled']   unless trading_enabled?
-      return [false, 'ticks_stale']        if stale?(seg:, sid:, max_age: max_tick_age)
+      return [false, 'trading_disabled'] unless trading_enabled?
+
+      return [false, 'ticks_stale'] if stale?(seg:, sid:, max_age: max_tick_age)
+
       return [false, 'max_trades_reached'] unless trade_budget_ok?
-      return [false, 'daily_loss_cap']     unless daily_loss_ok?(expected_risk_rupees: expected_risk_rupees)
+
+      return [false, 'daily_loss_cap'] unless daily_loss_ok?(expected_risk_rupees: expected_risk_rupees)
 
       [true, 'ok']
+    end
+
+    # Alias for simpler boolean interface
+    # Returns true if entry is allowed, false otherwise
+    def ok_to_enter?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
+      allowed, _reason = entry_allowed?(expected_risk_rupees: expected_risk_rupees, seg: seg, sid: sid, max_tick_age: max_tick_age)
+      allowed
     end
 
     # Freshness of ticks
@@ -41,7 +51,7 @@ module Risk
       end
       return true unless tick && tick[:ts].is_a?(Time)
 
-      (Time.now - tick[:ts]) > max_age
+      (Time.zone.now - tick[:ts]) > max_age
     end
 
     # New entry should not push realized losses beyond the cap

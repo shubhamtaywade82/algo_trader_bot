@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2025_08_23_072635) do
+ActiveRecord::Schema[8.0].define(version: 2025_08_23_103729) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -79,6 +79,22 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_23_072635) do
     t.index ["underlying_symbol", "expiry_date"], name: "index_derivatives_on_underlying_symbol_and_expiry_date", where: "(underlying_symbol IS NOT NULL)"
   end
 
+  create_table "holdings", force: :cascade do |t|
+    t.string "exchange"
+    t.string "trading_symbol"
+    t.bigint "security_id"
+    t.string "isin"
+    t.integer "total_qty", default: 0, null: false
+    t.integer "dp_qty", default: 0, null: false
+    t.integer "t1_qty", default: 0, null: false
+    t.integer "available_qty", default: 0, null: false
+    t.integer "collateral_qty", default: 0, null: false
+    t.decimal "avg_cost_price", precision: 12, scale: 2
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["exchange", "security_id", "trading_symbol"], name: "index_holdings_on_exchange_and_security_id_and_trading_symbol"
+  end
+
   create_table "instruments", force: :cascade do |t|
     t.string "exchange", null: false
     t.string "segment", null: false
@@ -125,6 +141,47 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_23_072635) do
     t.index ["security_id", "symbol_name", "exchange", "segment"], name: "index_instruments_unique", unique: true
     t.index ["symbol_name"], name: "index_instruments_on_symbol_name"
     t.index ["underlying_symbol", "expiry_date"], name: "index_instruments_on_underlying_symbol_and_expiry_date", where: "(underlying_symbol IS NOT NULL)"
+  end
+
+  create_table "positions", force: :cascade do |t|
+    t.string "dhan_client_id"
+    t.string "trading_symbol"
+    t.bigint "security_id"
+    t.string "position_type"
+    t.string "exchange_segment"
+    t.string "product_type"
+    t.decimal "buy_avg", precision: 12, scale: 2
+    t.integer "buy_qty", default: 0, null: false
+    t.decimal "cost_price", precision: 12, scale: 2
+    t.decimal "sell_avg", precision: 12, scale: 2
+    t.integer "sell_qty", default: 0, null: false
+    t.integer "net_qty", default: 0, null: false
+    t.decimal "realized_profit", precision: 14, scale: 2
+    t.decimal "unrealized_profit", precision: 14, scale: 2
+    t.decimal "rbi_reference_rate", precision: 10, scale: 4
+    t.integer "multiplier"
+    t.integer "carry_forward_buy_qty", default: 0
+    t.integer "carry_forward_sell_qty", default: 0
+    t.decimal "carry_forward_buy_value", precision: 14, scale: 2
+    t.decimal "carry_forward_sell_value", precision: 14, scale: 2
+    t.integer "day_buy_qty", default: 0
+    t.integer "day_sell_qty", default: 0
+    t.decimal "day_buy_value", precision: 14, scale: 2
+    t.decimal "day_sell_value", precision: 14, scale: 2
+    t.date "drv_expiry_date"
+    t.string "drv_option_type"
+    t.decimal "drv_strike_price", precision: 12, scale: 2
+    t.boolean "cross_currency", default: false
+    t.string "tradable_type"
+    t.bigint "tradable_id"
+    t.string "state", default: "OPEN"
+    t.decimal "entry_price", precision: 12, scale: 2
+    t.decimal "unrealized_pnl", precision: 14, scale: 2
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["exchange_segment", "security_id", "trading_symbol"], name: "idx_on_exchange_segment_security_id_trading_symbol_87deb66c05"
+    t.index ["state"], name: "index_positions_on_state"
+    t.index ["tradable_type", "tradable_id"], name: "index_positions_on_tradable_type_and_tradable_id"
   end
 
   create_table "scalp_sessions", force: :cascade do |t|

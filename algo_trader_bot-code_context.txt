@@ -3,6 +3,16 @@ class ApplicationController < ActionController::API
 end
 
 
+# File: app/controllers/holdings_controller.rb
+class HoldingsController < ApplicationController
+end
+
+
+# File: app/controllers/positions_controller.rb
+class PositionsController < ApplicationController
+end
+
+
 # File: app/jobs/application_job.rb
 class ApplicationJob < ActiveJob::Base
   # Automatically retry jobs that encountered a deadlock
@@ -13,12 +23,23 @@ class ApplicationJob < ActiveJob::Base
 end
 
 
+# File: app/jobs/mtf_start_job.rb
+# app/jobs/mtf_start_job.rb
+class MtfStartJob < ApplicationJob
+  queue_as :default
+  def perform
+    # Live::WsHub.instance.start!(mode: :quote) # already in initializer; idempotent
+    Runner::MtfLoop.start(symbols: %w[NIFTY BANKNIFTY], timeframe: '15m')
+  end
+end
+
+
 # File: app/jobs/scalp_session_runner_job.rb
 class ScalpSessionRunnerJob < ApplicationJob
   queue_as :default
 
   # Long-running job – ensure delayed_job timeout is high enough or disabled for this queue
-  def perform(date: Date.current, capital: 100000.0, max_day_loss: 3000.0, roster: %w[NIFTY BANKNIFTY], risk_rupees: 600.0)
+  def perform(date: Date.current, capital: 100_000.0, max_day_loss: 3000.0, roster: %w[NIFTY BANKNIFTY], risk_rupees: 600.0)
     session = ScalpSession.find_or_create_by!(trade_date: date) do |s|
       s.capital      = capital
       s.max_day_loss = max_day_loss
@@ -44,6 +65,109 @@ class ScalpSessionStopJob < ApplicationJob
     end
   end
 end
+
+# File: app/lib/state/events.rb
+# app/lib/state/events.rb
+module State
+  class Events
+    PATH = Rails.root.join("tmp/trader_events.ndjson")
+
+    def self.log(type:, data:)
+      File.open(PATH, "a") { |f| f.puts({ ts: Time.now.iso8601, type:, data: }.to_json) }
+    rescue => e
+      Rails.logger.warn("Event log fail: #{e.class} #{e.message}")
+    end
+
+    def self.replay!
+      return unless File.exist?(PATH)
+      File.foreach(PATH) do |line|
+        evt = JSON.parse(line) rescue next
+        apply(evt["type"], evt["data"].deep_symbolize_keys)
+      end
+    end
+
+    def self.apply(type, data)
+      case type.to_sym
+      when :order_upsert   then State::OrderCache.put!(data[:client_ref], data)
+      when :order_delete   then # optional, already handled
+      when :position_upsert then State::PositionCache.upsert!(**data.slice(:seg,:sid,:prod), attrs: data)
+      when :position_delete then State::PositionCache.delete!(**data.slice(:seg,:sid,:prod))
+      end
+    end
+  end
+end
+
+
+# File: app/lib/state/order_cache.rb
+# app/lib/state/order_cache.rb
+module State
+  class OrderCache
+    KEY = "orders:v1" # single hash stored in Rails.cache
+
+    def self.fetch_all
+      Rails.cache.fetch(KEY) { {} } # { client_ref => { ... } }
+    end
+
+    def self.get(client_ref) = fetch_all[client_ref]
+
+    def self.put!(client_ref, payload)
+      h = fetch_all
+      h[client_ref] = payload
+      Rails.cache.write(KEY, h)
+      Events.log(type: :order_upsert, data: payload)
+      true
+    end
+
+    def self.find_by_broker_id(oid)
+      fetch_all.values.find { |o| o[:broker_order_id] == oid }
+    end
+
+    def self.delete!(client_ref)
+      h = fetch_all
+      h.delete(client_ref)
+      Rails.cache.write(KEY, h)
+      Events.log(type: :order_delete, data: { client_ref: })
+    end
+  end
+end
+
+
+# File: app/lib/state/position_cache.rb
+# app/lib/state/position_cache.rb
+module State
+  class PositionCache
+    KEY = "positions:v1" # { pos_key => {...} }
+
+    def self.key(seg:, sid:, prod:)
+      "#{seg}:#{sid}:#{prod}"
+    end
+
+    def self.fetch_all
+      Rails.cache.fetch(KEY) { {} }
+    end
+
+    def self.get(seg:, sid:, prod:)
+      fetch_all[key(seg:, sid:, prod:)]
+    end
+
+    def self.upsert!(seg:, sid:, prod:, attrs:)
+      h = fetch_all
+      k = key(seg:, sid:, prod:)
+      h[k] = (h[k] || {}).merge(attrs).merge(updated_at: Time.current)
+      Rails.cache.write(KEY, h)
+      Events.log(type: :position_upsert, data: h[k].merge(key: k))
+      h[k]
+    end
+
+    def self.delete!(seg:, sid:, prod:)
+      h = fetch_all
+      h.delete(key(seg:, sid:, prod:))
+      Rails.cache.write(KEY, h)
+      Events.log(type: :position_delete, data: { seg:, sid:, prod: })
+    end
+  end
+end
+
 
 # File: app/mailers/application_mailer.rb
 class ApplicationMailer < ActionMailer::Base
@@ -450,6 +574,18 @@ module InstrumentHelpers
     nil
   end
 
+  def subscribe_params
+    { ExchangeSegment: exchange_segment, SecurityId: security_id.to_s }
+  end
+
+  def ws_get
+    Live::TickCache.get(exchange_segment, security_id.to_s)
+  end
+
+  def ws_ltp
+    ws_get&.dig(:ltp)
+  end
+
   def ohlc
     response = DhanHQ::Models::MarketFeed.ohlc(exch_segment_enum)
     response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil
@@ -473,9 +609,9 @@ module InstrumentHelpers
     nil
   end
 
-  def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil)
+  def intraday_ohlc(interval: '5', oi: false, from_date: nil, to_date: nil, days: 90)
     to_date ||= MarketCalendar.today_or_last_trading_day.to_s
-    from_date ||= (Date.parse(to_date) - 5).to_s # fetch last 5 sessions by default
+    from_date ||= (Date.parse(to_date) - days).to_s # fetch last 5 sessions by default
 
     DhanHQ::Models::HistoricalData.intraday(
       security_id: security_id,
@@ -483,7 +619,7 @@ module InstrumentHelpers
       instrument: instrument_type,
       interval: interval,
       oi: oi,
-      from_date: from_date || (Time.zone.today - 90).to_s,
+      from_date: from_date || (Time.zone.today - days).to_s,
       to_date: to_date || (Time.zone.today - 1).to_s
     )
   rescue StandardError => e
@@ -584,6 +720,11 @@ class Derivative < ApplicationRecord
 end
 
 
+# File: app/models/holding.rb
+class Holding < ApplicationRecord
+end
+
+
 # File: app/models/instrument.rb
 class Instrument < ApplicationRecord
   include InstrumentHelpers
@@ -635,6 +776,21 @@ class Instrument < ApplicationRecord
 end
 
 
+# File: app/models/position.rb
+class Position < ApplicationRecord
+  belongs_to :tradable, polymorphic: true, optional: true
+
+  enum :state, { open: 'OPEN', closed: 'CLOSED' }, prefix: :state
+
+  # convenience helpers
+  def instrument? = tradable_type == 'Instrument'
+  def derivative? = tradable_type == 'Derivative'
+
+  def security_id = self[:security_id] || tradable&.security_id
+  def exchange_segment = self[:exchange_segment] || tradable&.exchange_segment
+end
+
+
 # File: app/models/scalp_session.rb
 class ScalpSession < ApplicationRecord
   enum :status, { idle: 'idle', running: 'running', stopped: 'stopped', killed: 'killed' }
@@ -647,6 +803,38 @@ class ScalpSession < ApplicationRecord
   end
 end
 
+
+# File: app/models/setting.rb
+class Setting < ApplicationRecord
+  validates :key, presence: true, uniqueness: true
+
+  # Cached read
+  def self.fetch(key, default = nil, ttl: 30)
+    Rails.cache.fetch("setting:#{key}", expires_in: ttl.seconds) do
+      find_by(key:)&.value || default
+    end
+  end
+
+  # Write + cache bust
+  def self.put(key, value)
+    rec = find_or_initialize_by(key:)
+    rec.value = value.to_s
+    rec.save!
+    Rails.cache.delete("setting:#{key}")
+    value
+  end
+
+  # Typed helpers (quality of life)
+  def self.fetch_i(key, default = 0) = fetch(key, default).to_i
+  def self.fetch_f(key, default = 0.0) = fetch(key, default).to_f
+
+  def self.fetch_bool(key, default = false) # rubocop:disable Style/OptionalBooleanParameter,Naming/PredicateMethod
+    raw = fetch(key, default)
+    return !!raw if [true, false].include?(raw)
+
+    %w[1 true yes on].include?(raw.to_s.strip.downcase)
+  end
+end
 
 # File: app/services/algo_runner.rb
 class AlgoRunner
@@ -767,6 +955,144 @@ class ApplicationService
     end
   end
 end
+
+# File: app/services/bars/fetch_loop.rb
+# frozen_string_literal: true
+
+module Bars
+  class FetchLoop
+    class << self
+      def start(symbols:, timeframe: '1m', &on_series)
+        stop
+        @running = true
+        @thread = Thread.new do
+          while @running
+            begin
+              tick = Time.current
+              symbols.each do |sym|
+                inst = Instrument.segment_index.find_by(symbol_name: sym) || Instrument.segment_equity.find_by(display_name: sym)
+                next unless inst
+
+                raw = inst.intraday_ohlc(interval: interval_for(timeframe), days: 20)
+                next if raw.blank?
+
+                series = CandleSeries.new(symbol: inst.symbol_name, interval: interval_for(timeframe))
+                series.load_from_raw(raw)
+                on_series&.call(sym, series)
+              end
+            rescue StandardError => e
+              Rails.logger.error("[Bars::FetchLoop] #{e.class}: #{e.message}")
+            ensure
+              sleep sleep_to_next_bar(timeframe, from: tick)
+            end
+          end
+        end
+      end
+
+      def stop
+        @running = false
+        @thread&.kill
+        @thread = nil
+      end
+
+      private
+
+      def interval_for(tf)
+        case tf.to_s
+        when '1m' then '1'
+        when '3m' then '3'
+        when '5m' then '5'
+        when '15m' then '15'
+        else '1'
+        end
+      end
+
+      def sleep_to_next_bar(tf, from:)
+        secs = case tf.to_s
+               when '1m'  then 60
+               when '3m'  then 180
+               when '5m'  then 300
+               when '15m' then 900
+               else 60
+               end
+        drift  = (Time.current - from).to_f
+        remain = secs - (from.to_i % secs)
+        [remain + 2 - drift, 5].max
+      end
+    end
+  end
+end
+
+
+# File: app/services/broker/reconcile_light.rb
+# app/services/broker/reconcile_light.rb
+module Broker
+  class ReconcileLight < ApplicationService
+    def call
+      reconcile_positions
+      reconcile_orders # optional; super orders list is useful
+    end
+
+    def reconcile_positions
+      broker = DhanHQ::Models::Position.all # GET /v2/positions
+      seen = {}
+      broker.each do |p|
+        seg = p.exchange_segment; sid = p.security_id; prod = p.product_type
+        k = State::PositionCache.key(seg:, sid:, prod:)
+        seen[k] = true
+
+        State::PositionCache.upsert!(
+          seg:, sid:, prod:,
+          attrs: {
+            trading_symbol: p.trading_symbol,
+            net_qty:        p.net_qty.to_i,
+            buy_avg:        p.buy_avg.to_f,
+            sell_avg:       p.sell_avg.to_f,
+            realized:       p.realized_profit.to_f,
+            unrealized:     p.unrealized_profit.to_f,
+            external:       external?(k) # mark external if not in local orders
+          }
+        )
+      end
+
+      # remove closed entries
+      State::PositionCache.fetch_all.keys.each do |k|
+        State::PositionCache.delete!(**split(k)) unless seen[k]
+      end
+    end
+
+    def reconcile_orders
+      # optional: only when you need status or leg details
+      supers = DhanHQ::Models::SuperOrder.all # GET /v2/super/orders
+      supers.each do |o|
+        cref = o["correlationId"]
+        next unless cref
+        State::OrderCache.put!(cref, {
+          client_ref: cref,
+          broker_order_id: o["orderId"],
+          status: o["orderStatus"],
+          quantity: o["quantity"].to_i,
+          filled_qty: o["filledQty"].to_i,
+          remaining_quantity: o["remainingQuantity"].to_i,
+          target_price: o.dig("legDetails")&.find{_1["legName"]=="TARGET_LEG"}&.[]("price"),
+          stop_loss_price: o.dig("legDetails")&.find{_1["legName"]=="STOP_LOSS_LEG"}&.[]("price"),
+          trailing_jump: o.dig("legDetails")&.find{_1["legName"]=="STOP_LOSS_LEG"}&.[]("trailingJump")
+        }.compact)
+      end
+    end
+
+    def split(k)
+      seg, sid, prod = k.split(":")
+      { seg:, sid: sid.to_i, prod: }
+    end
+
+    def external?(k)
+      # If no local order references this pos key recently, consider it external
+      State::OrderCache.fetch_all.values.none? { |o| o[:pos_key] == k }
+    end
+  end
+end
+
 
 # File: app/services/execution/order_executor.rb
 module Execution
@@ -906,6 +1232,150 @@ module Execution
   end
 end
 
+# File: app/services/exits/alignment_guard.rb
+# app/services/exits/alignment_guard.rb
+class Exits::AlignmentGuard < ApplicationService
+  def initialize(order:, underlying_symbol:)
+    @order = order
+    @symbol = underlying_symbol
+  end
+
+  def call
+    inst = Instrument.segment_index.find_by(symbol_name: @symbol) || Instrument.segment_equity.find_by(display_name: @symbol)
+    return true unless inst
+
+    sig = inst.supertrend_signal(interval: '5') # :long_entry / :short_entry
+    return true unless sig
+
+    long = (@order.side.to_s == 'buy') # we buy premium for CE/PE
+    # If CE → need long_entry; if PE → need short_entry; otherwise suggest exit
+    return (sig == :long_entry) if @order.cp == 'CE'
+    return (sig == :short_entry) if @order.cp == 'PE'
+
+    true
+  end
+end
+
+
+# File: app/services/exits/micro_tp.rb
+# app/services/exits/micro_tp.rb
+# Tightens TP and arms BE when live conditions indicate chop after entry.
+class Exits::MicroTP < ApplicationService
+  # order: Order with super_ref, tp_value, trail_sl_value, entry_price
+  # ltp:   current premium
+  # entry_ts: Time the position was opened
+  # side: :buy_ce or :buy_pe (profit when premium rises for both)
+  def initialize(order:, ltp:, entry_ts:, side:)
+    @order     = order
+    @ltp       = ltp.to_f
+    @entry_ts  = entry_ts || Time.now
+    @side      = side
+    @entry_pr  = order.entry_price.to_f
+    @r         = (@entry_pr * 0.25) # 25% SL baseline → 1R
+  end
+
+  def call
+    return unless valid_order?
+
+    mfe_r   = [(@ltp - @entry_pr) / (@r.nonzero? || 1.0), 0].max
+    stalled = stalled_seconds >= 180 # ≥ 3 minutes inside deadband
+    spreadp = spread_pct || 0.0
+
+    if chop_live?(mfe_r:, stalled:, spreadp:)
+      tighten_tp!
+      arm_break_even!
+    end
+
+    time_stop!
+  rescue StandardError => e
+    Rails.logger.warn("[MicroTP] #{e.class} #{e.message}")
+  end
+
+  private
+
+  def valid_order?
+    @order&.super_ref.present? && @entry_pr.positive?
+  end
+
+  def chop_live?(mfe_r:, stalled:, spreadp:)
+    # < 0.5R after 5 minutes OR stalled 3m OR spread% > 0.8
+    return true if (Time.now - @entry_ts) > 300 && mfe_r < 0.5
+    return true if stalled
+    return true if spreadp > 0.8
+
+    false
+  end
+
+  def tighten_tp!
+    # Target: entry + 0.30R from entry premium (or keep current if tighter)
+    target = PriceMath.round_tick(@entry_pr + (@r * 0.30))
+    cur    = @order.tp_value.to_f
+    return if cur.positive? && target >= cur # only tighten (lower TP level)
+
+    Orders::SuperModifier.call(order: @order, new_tp_value: target)
+  end
+
+  def arm_break_even!
+    # Raise trailing SL to slightly below entry (e.g., entry - 0.10R)
+    be = PriceMath.round_tick(@entry_pr - (@r * 0.10))
+    cur = @order.trail_sl_value.to_f
+    return if cur.positive? && be <= cur # only raise/tighten trail
+
+    Orders::SuperModifier.call(order: @order, new_trail_sl_value: be)
+  end
+
+  def time_stop!
+    # Hard time stop at 8 minutes with no TP hit
+    return unless (Time.now - @entry_ts) > 480
+
+    begin
+      DhanHQ::SuperOrders.close(super_order_id: @order.super_ref)
+    rescue StandardError
+      nil
+    end
+  end
+
+  # ---- stall & spread helpers ----
+
+  # Tracks last "meaningful move" (> 0.1R) in Rails.cache per order
+  def stalled_seconds
+    key = "stall:#{@order.super_ref}"
+    last = Rails.cache.fetch(key) do
+      { ltp: @ltp, ts: Time.now }
+    end
+
+    if (@ltp - last[:ltp]).abs >= (@r * 0.10)
+      Rails.cache.write(key, { ltp: @ltp, ts: Time.now }, expires_in: 1.hour)
+      0
+    else
+      (Time.now - (last[:ts] || Time.now)).to_i
+    end
+  end
+
+  def spread_pct
+    # Try to read bid/ask via your quote source; fallback to modest value
+    quote = safe { Live::Quote.get(@order.instrument.exchange_segment, @order.instrument.security_id) } ||
+            safe { DhanHQ::MarketData.quote(@order.instrument.security_id) }
+    return 0.4 unless quote
+
+    bid = quote[:bid].to_f
+    ask = quote[:ask].to_f
+    mid = [(bid + ask) / 2.0, @ltp].compact.max
+    return 0.4 if mid <= 0 || ask <= 0 || bid <= 0
+
+    (((ask - bid).abs / mid) * 100.0).round(2)
+  rescue StandardError
+    0.4
+  end
+
+  def safe(&)
+    yield
+  rescue StandardError
+    nil
+  end
+end
+
+
 # File: app/services/indicators/breaker_block.rb
 module Indicators
   class BreakerBlock
@@ -1017,6 +1487,146 @@ module Indicators
         end
       end
       fvg_zones
+    end
+  end
+end
+
+
+# File: app/services/indicators/holy_grail.rb
+# app/services/indicators/holy_grail.rb
+# frozen_string_literal: true
+
+require 'ruby_technical_analysis'
+require 'technical_analysis'
+
+module Indicators
+  class HolyGrail < ApplicationService
+    RTA = RubyTechnicalAnalysis
+    TA  = TechnicalAnalysis
+
+    EMA_FAST  = 34
+    EMA_SLOW  = 100
+    RSI_LEN   = 14
+    ADX_LEN   = 14
+    ATR_LEN   = 20
+    MACD_F = 12
+    MACD_S = 26
+    MACD_SIG = 9
+
+    # ------------------------------------------------------------------
+    # Result struct keeps the four “gate” keys first,
+    # then the raw indicators you already logged elsewhere.
+    # ------------------------------------------------------------------
+    Result = Struct.new(
+      :bias, :adx, :momentum, :proceed?,
+      :sma50, :ema200, :rsi14, :atr14, :macd, :trend,
+      keyword_init: true
+    ) do
+      def to_h = members.zip(values).to_h
+    end
+
+    # ------- ctor -----------------------------------------------------
+    def initialize(candles:)
+      @candles = candles # Dhan hash-of-arrays
+      raise ArgumentError, "need ≥ #{EMA_SLOW} candles" if closes.size < EMA_SLOW
+    end
+
+    # ------- main -----------------------------------------------------
+    def call
+      sma50  = sma(EMA_FAST)
+      ema200 = ema(EMA_SLOW)
+      rsi14  = rsi(RSI_LEN)
+      macd_h = macd_hash
+      adx14  = adx(ADX_LEN)
+      atr14  = atr(ATR_LEN)
+
+      bias =
+        if    sma50 > ema200 then :bullish
+        elsif sma50 < ema200 then :bearish
+        else
+          :neutral
+        end
+
+      momentum =
+        if macd_h[:macd] > macd_h[:signal] && rsi14 > 50
+          :up
+        elsif macd_h[:macd] < macd_h[:signal] && rsi14 < 50
+          :down
+        else
+          :flat
+        end
+
+      proceed =
+        case bias
+        when :bullish
+          passed = adx14 >= 20.0 && momentum == :up
+          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: bullish): adx=#{adx14}, momentum=#{momentum}" } unless passed
+          passed
+        when :bearish
+          passed = adx14 >= 20.0 && momentum == :down
+          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: bearish): adx=#{adx14}, momentum=#{momentum}" } unless passed
+          passed
+        else
+          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: #{bias}): neutral bias, adx=#{adx14}, momentum=#{momentum}" }
+          false
+        end
+
+      latest_time = Time.zone.at(stamps.last)
+      Rails.logger.debug { "[HolyGrail] (#{latest_time}) Not proceeding ..." }
+      trend =
+        if ema200 < closes.last && sma50 > ema200 then :up
+        elsif ema200 > closes.last && sma50 < ema200 then :down
+        else
+          :side
+        end
+
+      Result.new(
+        bias:, adx: adx14, momentum:, proceed?: proceed,
+        sma50:, ema200:, rsi14:, atr14:, macd: macd_h, trend:
+      )
+    end
+
+    # ------- helpers --------------------------------------------------
+    private
+
+    def closes = @candles['close'].map(&:to_f)
+    def highs  = @candles['high'].map(&:to_f)
+    def lows   = @candles['low'].map(&:to_f)
+    def stamps = @candles['timestamp'] || []
+
+    # ---------- rows with :date_time required by technical_analysis ---
+    def ohlc_rows
+      @ohlc_rows ||= highs.each_index.map do |i|
+        {
+          date_time: Time.zone.at(stamps[i] || 0), # <- NEW
+          high: highs[i],
+          low: lows[i],
+          close: closes[i]
+        }
+      end
+    end
+
+    # — ruby-technical-analysis —
+    def sma(len) = closes.last(len).sum / len.to_f
+    def ema(len) = RTA::MovingAverages.new(series: closes, period: len).ema
+    def rsi(len) = RTA::RelativeStrengthIndex.new(series: closes, period: len).call
+
+    def macd_hash
+      m, s, h = RTA::Macd.new(series: closes,
+                              fast_period: MACD_F,
+                              slow_period: MACD_S,
+                              signal_period: MACD_SIG).call
+      { macd: m, signal: s, hist: h }
+    end
+
+    # — technical_analysis gem —
+    def atr(len)
+      TA::Atr.calculate(ohlc_rows.last(len * 2), period: len).first.atr
+    end
+
+    def adx(len)
+      ad = TA::Adx.calculate(ohlc_rows.last(len * 2), period: len)
+      ad.first.adx
     end
   end
 end
@@ -1609,6 +2219,289 @@ module MarketCalendar
 end
 
 
+# File: app/services/mtf/fvg.rb
+# frozen_string_literal: true
+
+module Mtf
+  class Fvg
+    Gap = Struct.new(:dir, :i, :hi, :lo, keyword_init: true) # dir :up/:down, i = middle bar index
+
+    # Classic 3-candle Fvg:
+    #  up: low[i+1] > high[i-1]
+    # down: high[i+1] < low[i-1]
+    def self.scan(series, lookback: 30)
+      out = []
+      bars = series.candles
+      return out if bars.size < 3
+
+      start = [0, bars.size - lookback - 1].max
+      (start...(bars.size - 1)).each do |i|
+        prev = begin
+          bars[i - 1]
+        rescue StandardError
+          nil
+        end
+        nxt = begin
+          bars[i + 1]
+        rescue StandardError
+          nil
+        end
+        next unless prev && nxt
+
+        if nxt.low > prev.high
+          out << Gap.new(dir: :up, i: i, hi: prev.high, lo: nxt.low)
+        elsif nxt.high < prev.low
+          out << Gap.new(dir: :down, i: i, hi: nxt.high, lo: prev.low)
+        end
+      end
+      out
+    end
+
+    def self.price_in_gap?(gap, price)
+      return false unless gap
+
+      price > gap.hi && price < gap.lo
+    end
+  end
+end
+
+
+# File: app/services/mtf/liquidity.rb
+# frozen_string_literal: true
+
+module Mtf
+  class Liquidity
+    Pool = Struct.new(:kind, :i1, :i2, :level, keyword_init: true) # :eq_highs/:eq_lows
+
+    def self.equal_highs(series, tol_pct: 0.0005, lookback: 40)
+      scan(series, :high, :eq_highs, tol_pct: tol_pct, lookback: lookback)
+    end
+
+    def self.equal_lows(series, tol_pct: 0.0005, lookback: 40)
+      scan(series, :low, :eq_lows, tol_pct: tol_pct, lookback: lookback)
+    end
+
+    def self.scan(series, field, kind, tol_pct:, lookback:)
+      bars = series.candles.last(lookback)
+      out  = []
+      (0...(bars.size - 1)).each do |i|
+        a = bars[i].public_send(field)
+        b = bars[i + 1].public_send(field)
+        next if [a, b].any?(&:nil?)
+
+        tol = [a, b].max * tol_pct
+        out << Pool.new(kind: kind, i1: i, i2: i + 1, level: (a + b) / 2.0) if (a - b).abs <= tol
+      end
+      out
+    end
+  end
+end
+
+# File: app/services/mtf/order_block.rb
+# frozen_string_literal: true
+
+module Mtf
+  class OrderBlock
+    Zone = Struct.new(:kind, :index, :open, :high, :low, :close, keyword_init: true) # kind: :demand/:supply
+
+    # last down candle before up-BOS → demand; last up candle before down-BOS → supply
+    def self.last_before_bos(series, bos_sig)
+      return nil unless bos_sig&.kind == :BOS
+
+      bars = series.candles
+      i    = bars.size - 2
+
+      if bos_sig.dir == :up
+        # find last bearish candle before BOS index
+        while i >= 1 && i > bos_sig.at_index - 20
+          c = bars[i]
+          return Zone.new(kind: :demand, index: i, open: c.open, high: c.high, low: c.low, close: c.close) if c.close < c.open
+
+          i -= 1
+        end
+      else
+        while i >= 1 && i > bos_sig.at_index - 20
+          c = bars[i]
+          return Zone.new(kind: :supply, index: i, open: c.open, high: c.high, low: c.low, close: c.close) if c.close > c.open
+
+          i -= 1
+        end
+      end
+      nil
+    end
+
+    # price-in-zone test (allow wick tolerance)
+    def self.price_touches?(zone, price, pad_pct: 0.0005)
+      return false unless zone
+
+      lo = [zone.low, zone.open, zone.close].min
+      hi = [zone.high, zone.open, zone.close].max
+      pad = (hi - lo) * pad_pct
+      (price >= lo - pad) && (price <= hi + pad)
+    end
+  end
+end
+
+
+# File: app/services/mtf/resampler.rb
+# frozen_string_literal: true
+
+module Mtf
+  class Resampler
+    Bucket = Struct.new(:ts, :o, :h, :l, :c, :vol, keyword_init: true)
+
+    # series: CandleSeries on 1m/3m/5m; minutes: 15 / 60 / 240
+    def self.to(series, minutes:)
+      raise 'series empty' if series.candles.empty?
+
+      step   = minutes * 60
+      out    = []
+      bucket = nil
+
+      series.candles.each do |bar|
+        t = bar.timestamp.to_i
+        bt = t - (t % step) # bucket start
+
+        if bucket.nil? || bucket.ts != bt
+          out << bucket_to_candle(bucket) if bucket
+          bucket = Bucket.new(ts: bt, o: bar.open, h: bar.high, l: bar.low, c: bar.close, vol: bar.volume.to_i)
+        else
+          bucket.h = [bucket.h, bar.high].max
+          bucket.l   = [bucket.l, bar.low].min
+          bucket.c   = bar.close
+          bucket.vol = bucket.vol.to_i + bar.volume.to_i
+        end
+      end
+
+      out << bucket_to_candle(bucket) if bucket
+
+      CandleSeries.new(symbol: series.symbol, interval: minutes.to_s).tap do |cs|
+        out.each { |c| cs.add_candle(c) }
+      end
+    end
+
+    def self.bucket_to_candle(b)
+      Candle.new(
+        ts: Time.at(b.ts).in_time_zone,
+        open: b.o,
+        high: b.h,
+        low: b.l,
+        close: b.c,
+        volume: b.vol.to_i
+      )
+    end
+  end
+end
+
+
+# File: app/services/mtf/series_loader.rb
+# frozen_string_literal: true
+
+module Mtf
+  class SeriesLoader
+    Result = Struct.new(:m5, :m15, :h1, :h4, keyword_init: true)
+
+    # instrument: your Instrument record
+    # base_interval: '5' (we’ll resample to 15/60/240)
+    def self.load(instrument:, base_interval: '5')
+      raw = instrument.intraday_ohlc(interval: base_interval)
+      return nil if raw.blank?
+
+      m5 = CandleSeries.new(symbol: instrument.symbol_name, interval: base_interval)
+      m5.load_from_raw(raw)
+
+      m15 = Mtf::Resampler.to(m5, minutes: 15)
+      h1  = Mtf::Resampler.to(m5, minutes: 60)
+      h4  = Mtf::Resampler.to(m5, minutes: 240)
+
+      Result.new(m5: m5, m15: m15, h1: h1, h4: h4)
+    end
+  end
+end
+
+
+# File: app/services/mtf/structure.rb
+# frozen_string_literal: true
+
+module Mtf
+  class Structure
+    Sig = Struct.new(:kind, :at_index, :price, :dir, keyword_init: true) # kind: :BOS/:CHOCH, dir: :up/:down
+
+    # returns :up (HH/HL) | :down (LH/LL) | :range
+    def self.trend(series, lookback: 5)
+      highs = series.highs.last(lookback + 3)
+      lows  = series.lows.last(lookback + 3)
+
+      return :range if highs.size < 4
+
+      higher_highs = highs.each_cons(2).all? { |a, b| b >= a }
+      higher_lows  = lows.each_cons(2).all?  { |a, b| b >= a }
+      lower_highs  = highs.each_cons(2).all? { |a, b| b <= a }
+      lower_lows   = lows.each_cons(2).all?  { |a, b| b <= a }
+
+      return :up   if higher_highs && higher_lows
+      return :down if lower_highs && lower_lows
+
+      :range
+    end
+
+    # BOS = current close breaks last swing extreme in trend direction
+    def self.bos(series, dir:)
+      idx = series.candles.size - 1
+      return nil if idx < 3
+
+      last_close = series.candles.last.close
+      swings_h   = swing_highs(series, lookback: 2).last(5)
+      swings_l   = swing_lows(series,  lookback: 2).last(5)
+
+      if dir == :up && swings_h.last && last_close > swings_h.last[:price]
+        return Sig.new(kind: :BOS, at_index: idx, price: last_close, dir: :up)
+      elsif dir == :down && swings_l.last && last_close < swings_l.last[:price]
+        return Sig.new(kind: :BOS, at_index: idx, price: last_close, dir: :down)
+      end
+
+      nil
+    end
+
+    # CHOCH = break opposite to prior trend (simple)
+    def self.choch(series, prior_dir:)
+      idx = series.candles.size - 1
+      last_close = series.candles.last.close
+      swings_h   = swing_highs(series, lookback: 2).last(5)
+      swings_l   = swing_lows(series,  lookback: 2).last(5)
+
+      if prior_dir == :up && swings_l.last && last_close < swings_l.last[:price]
+        return Sig.new(kind: :CHOCH, at_index: idx, price: last_close, dir: :down)
+      elsif prior_dir == :down && swings_h.last && last_close > swings_h.last[:price]
+        return Sig.new(kind: :CHOCH, at_index: idx, price: last_close, dir: :up)
+      end
+
+      nil
+    end
+
+    def self.swing_highs(series, lookback: 2)
+      out = []
+      series.candles.each_with_index do |c, i|
+        next unless series.swing_high?(i, lookback)
+
+        out << { i: i, price: c.high }
+      end
+      out
+    end
+
+    def self.swing_lows(series, lookback: 2)
+      out = []
+      series.candles.each_with_index do |c, i|
+        next unless series.swing_low?(i, lookback)
+
+        out << { i: i, price: c.low }
+      end
+      out
+    end
+  end
+end
+
+
 # File: app/services/openai/behaviour_explainer.rb
 module Openai
   class BehaviourExplainer < ApplicationService
@@ -1670,6 +2563,1588 @@ module Openai
 end
 
 # File: app/services/option/chain_analyzer.rb
+# frozen_string_literal: true
+
+module Option
+  class ChainAnalyzer
+    IV_RANK_MIN        = 0.00
+    IV_RANK_MAX        = 0.80
+    THETA_AVOID_HOUR   = 14.5 # 2:30 PM
+    TOP_RANKED_LIMIT   = 10
+
+    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta
+
+    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [])
+      @option_chain     = option_chain.with_indifferent_access
+      @expiry           = Date.parse(expiry.to_s)
+      @underlying_spot  = underlying_spot.to_f
+      @iv_rank          = iv_rank.to_f
+      @historical_data  = historical_data || []
+      @ta = (Indicators::HolyGrail.call(candles: historical_data) if historical_data.present?)
+
+      Rails.logger.debug { "[Option::ChainAnalyzer] Analyzing Options for #{expiry}" }
+      raise ArgumentError, 'Option Chain is missing or empty!' if @option_chain[:oc].blank?
+    end
+
+    # Main entry
+    def analyze(signal_type:, strategy_type:, signal_strength: 1.0)
+      result = {
+        proceed: true,
+        reason: nil,
+        signal_type: signal_type, # :ce / :pe
+        trend: nil,
+        momentum: nil,
+        adx: nil,
+        selected: nil,
+        ranked: [],
+        ta_snapshot: ta ? ta.to_h : {}
+      }
+
+      # 1) Core sanity gates
+      if iv_rank_outside_range?
+        result[:proceed] = false
+        result[:reason]  = 'IV rank outside range'
+      elsif discourage_late_entry_due_to_theta?
+        result[:proceed] = false
+        result[:reason]  = 'Late entry, theta risk'
+      end
+
+      # 2) Bias / momentum / ADX (HolyGrail if available)
+      result[:trend]    = ta ? ta.bias.to_sym     : intraday_trend
+      result[:momentum] = ta ? ta.momentum.to_sym : :flat
+      result[:adx]      = ta&.adx
+      adx_ok            = ta ? ta.adx.to_f >= 25 : true
+
+      if result[:proceed] && !(trend_confirms?(result[:trend], signal_type) && adx_ok && result[:momentum] != :flat)
+        result[:proceed] = false
+        result[:reason]  = 'trend/momentum filter'
+      end
+
+      # 3) Candidate strikes → score → rank
+      if result[:proceed]
+        filtered = gather_filtered_strikes(signal_type)
+        if filtered.empty?
+          result[:proceed] = false
+          result[:reason]  = 'No tradable strikes found'
+        else
+          m_boost = (result[:momentum] == :strong ? 1.15 : 1.0)
+          ranked  = filtered.map do |opt|
+            score = score_for(opt, strategy_type, signal_type, signal_strength) * m_boost
+            opt.merge(score: score)
+          end.sort_by { |o| -o[:score] }
+
+          result[:ranked]   = ranked.first(TOP_RANKED_LIMIT)
+          result[:selected] = result[:ranked].first
+        end
+      end
+
+      result
+    end
+
+    # Public helper
+    def current_trend = intraday_trend
+    alias trend current_trend
+
+    private
+
+    def iv_rank_outside_range?
+      @iv_rank < IV_RANK_MIN || @iv_rank > IV_RANK_MAX
+    end
+
+    def gather_filtered_strikes(signal_type)
+      side = signal_type.to_sym # :ce / :pe
+
+      @option_chain[:oc].filter_map do |strike_str, row|
+        opt = row[side.to_s]
+        next unless opt
+
+        # Must have price + IV
+        next if opt['implied_volatility'].to_f.zero? || opt['last_price'].to_f.zero?
+
+        strike_price = strike_str.to_f
+        delta_abs    = opt.dig('greeks', 'delta').to_f.abs
+
+        # Min Δ gates (time‑of‑day)
+        next if delta_abs < min_delta_now
+
+        # Adaptive ATM window
+        next unless within_atm_range?(strike_price)
+
+        build_strike_data(strike_price, opt)
+      end
+    end
+
+    # Dynamic Δ thresholds
+    def min_delta_now
+      h = Time.zone.now.hour
+      return 0.45 if h >= 14
+      return 0.35 if h >= 13
+      return 0.30 if h >= 11
+
+      0.25
+    end
+
+    # Adaptive ATM window by IV rank
+    def atm_range_pct
+      case iv_rank
+      when 0.0..0.2 then 0.01
+      when 0.2..0.5 then 0.015
+      else               0.025
+      end
+    end
+
+    def within_atm_range?(strike)
+      band = atm_range_pct
+      lo   = @underlying_spot * (1 - band)
+      hi   = @underlying_spot * (1 + band)
+      strike.between?(lo, hi)
+    end
+
+    def build_strike_data(strike_price, opt)
+      {
+        strike_price: strike_price,
+        last_price: opt['last_price'].to_f,
+        iv: opt['implied_volatility'].to_f,
+        oi: opt['oi'].to_i,
+        volume: opt['volume'].to_i,
+        greeks: {
+          delta: opt.dig('greeks', 'delta').to_f,
+          gamma: opt.dig('greeks', 'gamma').to_f,
+          theta: opt.dig('greeks', 'theta').to_f,
+          vega: opt.dig('greeks', 'vega').to_f
+        },
+        previous_close_price: opt['previous_close_price'].to_f,
+        previous_oi: opt['previous_oi'].to_i,
+        previous_volume: opt['previous_volume'].to_i,
+        price_change: opt['last_price'].to_f - opt['previous_close_price'].to_f,
+        oi_change: opt['oi'].to_i - opt['previous_oi'].to_i,
+        volume_change: opt['volume'].to_i - opt['previous_volume'].to_i,
+        bid_ask_spread: (opt['top_ask_price'].to_f - opt['top_bid_price'].to_f).abs
+      }
+    end
+
+    def score_for(opt, strategy, signal_type, signal_strength)
+      spread          = opt[:bid_ask_spread] <= 0 ? 0.1 : opt[:bid_ask_spread]
+      last_price      = opt[:last_price].to_f
+      relative_spread = spread / (last_price.nonzero? || 1.0)
+
+      oi        = [opt[:oi], 1].max
+      volume    = [opt[:volume], 1].max
+      delta     = opt[:greeks][:delta].abs
+      gamma     = opt[:greeks][:gamma]
+      theta     = opt[:greeks][:theta]
+      vega      = opt[:greeks][:vega]
+      price_chg = opt[:price_change]
+      oi_chg    = opt[:oi_change]
+      vol_chg   = opt[:volume_change]
+
+      # weights: intraday vs swing
+      lw, mw, = (strategy.to_s == 'intraday' ? [0.35, 0.35, 0.3] : [0.25, 0.25, 0.5])
+
+      # Liquidity (penalize wide spreads)
+      liquidity_score = ((oi * volume) + vol_chg.abs) / (relative_spread.nonzero? || 0.01)
+
+      # Flow/momentum
+      momentum_score  = (oi_chg / 1000.0)
+      momentum_score += price_chg.positive? ? price_chg : price_chg.abs if delta >= 0 && price_chg.positive?
+
+      # Theta pressure ↑ near expiry
+      days_left     = (@expiry - Time.zone.today).to_i
+      theta_penalty = theta.abs * (days_left < 3 ? 2.0 : 1.0)
+      greeks_score  = (delta * 100) + (gamma * 10) + (vega * 2) - (theta_penalty * 3)
+
+      # Price efficiency
+      efficiency = last_price.zero? ? 0.0 : (price_chg / last_price)
+      efficiency_score = efficiency * 30
+
+      total = (liquidity_score * lw) +
+              (momentum_score  * mw) +
+              (greeks_score    * theta_weight) +
+              efficiency_score
+
+      # Skew checks
+      z = local_iv_zscore(opt[:iv], opt[:strike_price])
+      total *= 0.90 if z > 1.5
+
+      tilt = skew_tilt
+      total *= 1.10 if (signal_type == :ce && tilt == :call) || (signal_type == :pe && tilt == :put)
+
+      # Historical IV sanity
+      hist_vol = historical_volatility
+      if hist_vol.positive?
+        iv_ratio = opt[:iv] / hist_vol
+        total *= 0.9 if iv_ratio > 1.5
+      end
+
+      total * signal_strength
+    end
+
+    def theta_weight
+      Time.zone.now.hour >= 13 ? 4.0 : 3.0
+    end
+
+    def local_iv_zscore(strike_iv, strike)
+      neighbours = @option_chain[:oc].keys.map(&:to_f).select { |s| (s - strike).abs <= 300 }
+      ivs = neighbours.filter_map do |s|
+        node = @option_chain[:oc][format('%.6f', s)]
+        (node && node['ce'] && node['ce']['implied_volatility']).to_f
+      end
+      return 0 if ivs.empty?
+
+      mean = ivs.sum / ivs.size
+      var  = ivs.sum { |v| (v - mean)**2 } / ivs.size
+      std  = Math.sqrt(var)
+      std.zero? ? 0 : (strike_iv - mean) / std
+    end
+
+    def skew_tilt
+      ce_ivs = collect_side_ivs(:ce)
+      pe_ivs = collect_side_ivs(:pe)
+      avg_ce = ce_ivs.any? ? ce_ivs.sum / ce_ivs.size.to_f : nil
+      avg_pe = pe_ivs.any? ? pe_ivs.sum / pe_ivs.size.to_f : nil
+
+      return :call if avg_ce && avg_pe && avg_ce > avg_pe * 1.1
+      return :put  if avg_pe && avg_ce && avg_pe > avg_ce * 1.1
+
+      :neutral
+    end
+
+    def collect_side_ivs(side)
+      @option_chain[:oc].values.filter_map do |row|
+        v = row.dig(side.to_s, 'implied_volatility')
+        v.to_f if v && v.to_f > 0
+      end
+    end
+
+    # simple HV (annualized %)
+    def historical_volatility
+      return 0 if @historical_data.blank?
+
+      closes = @historical_data['close'] || []
+      return 0 if closes.size < 10
+
+      rets = []
+      closes.each_cons(2) do |a, b|
+        rets << Math.log(b.to_f / a.to_f)
+      rescue StandardError
+        rets << 0
+      end
+      mean = rets.sum / (rets.size.nonzero? || 1)
+      var  = rets.sum { |r| (r - mean)**2 } / (rets.size.nonzero? || 1)
+      Math.sqrt(var) * Math.sqrt(252) * 100.0
+    end
+
+    # Flow bias from CE vs PE change around ATM
+    def intraday_trend
+      atm = determine_atm_strike
+      return :neutral unless atm
+
+      window  = 3
+      sums    = { ce: 0.0, pe: 0.0 }
+      strikes = @option_chain[:oc].keys.map(&:to_f)
+      strikes.select { |s| (s - atm).abs <= (window * 100) }.each do |s|
+        key = format('%.6f', s)
+        %i[ce pe].each do |side|
+          opt = @option_chain[:oc].dig(key, side.to_s)
+          next unless opt
+
+          change = opt['last_price'].to_f - opt['previous_close_price'].to_f
+          sums[side] += change
+        end
+      end
+      diff = sums[:ce] - sums[:pe]
+      return :bullish if diff.positive?
+      return :bearish if diff.negative?
+
+      :neutral
+    end
+
+    def trend_confirms?(trend, signal_type)
+      return true if trend == :neutral
+
+      (trend == :bullish && signal_type == :ce) || (trend == :bearish && signal_type == :pe)
+    end
+
+    def discourage_late_entry_due_to_theta?
+      now           = Time.zone.now
+      expiry_today  = (@expiry == now.to_date)
+      current_hours = now.hour + (now.min / 60.0)
+      expiry_today && current_hours > THETA_AVOID_HOUR
+    end
+
+    def determine_atm_strike
+      strikes = @option_chain[:oc].keys.map(&:to_f)
+      return nil if strikes.empty?
+
+      strikes.min_by { |s| (s - @underlying_spot).abs }
+    end
+  end
+end
+
+
+# File: app/services/options/chain_analyzer.rb
+# frozen_string_literal: true
+
+module Options
+  # Facade for legacy callers. Picks ATM± range via Option::ChainAnalyzer and
+  # returns a single best row with derivative details (security_id, lot_size, …)
+  class ChainAnalyzer < ApplicationService
+    def initialize(underlying:, side:, config: {})
+      @ul     = underlying
+      @side   = side.to_s.downcase.to_sym # :ce / :pe
+      @config = {
+        strategy_type: 'intraday'
+      }.merge(config || {})
+    end
+
+    def call
+      expiry = nearest_expiry(@ul)
+      return nil unless expiry
+
+      chain = safe_fetch_option_chain(@ul, expiry)
+      return nil if chain.blank? || chain[:oc].blank?
+
+      iv_rank = compute_iv_rank(chain)
+      spot    = chain[:last_price].to_f.nonzero? || @ul.ws_ltp || @ul.ltp
+      hist    = intraday_candles(@ul)
+
+      # Use the advanced analyzer
+      analyzer = Option::ChainAnalyzer.new(
+        chain,
+        expiry: expiry,
+        underlying_spot: spot.to_f,
+        iv_rank: iv_rank,
+        historical_data: hist
+      )
+
+      result = analyzer.analyze(signal_type: @side, strategy_type: @config[:strategy_type])
+
+      return nil unless result[:proceed] && (sel = result[:selected])
+
+      # Enrich with derivative info (security_id, lot, segment) and bid/ask
+      leg = to_legacy_row(@ul, chain, sel, expiry, @side)
+      return nil unless leg
+
+      # Final light guard (keeps your old expectations: non‑zero price, etc.)
+      return nil if leg[:ltp].to_f <= 0
+
+      leg
+    rescue StandardError => e
+      Rails.logger.error("[Options::ChainAnalyzer] #{e.class} #{e.message}")
+      nil
+    end
+
+    private
+
+    def nearest_expiry(inst)
+      Array(inst.expiry_list).first
+    rescue StandardError
+      nil
+    end
+
+    def safe_fetch_option_chain(inst, expiry)
+      inst.fetch_option_chain(expiry)
+    rescue StandardError => e
+      Rails.logger.error("[Options::ChainAnalyzer] option-chain fetch failed (#{expiry}): #{e.message}")
+      nil
+    end
+
+    # Same formula you used inside AlertProcessors::Index#iv_rank_for
+    def compute_iv_rank(chain)
+      atm = determine_atm_strike(chain)
+      return 0.5 unless atm
+
+      key   = format('%.6f', atm)
+      ce_iv = chain[:oc].dig(key, 'ce', 'implied_volatility').to_f
+      pe_iv = chain[:oc].dig(key, 'pe', 'implied_volatility').to_f
+      cur   = [ce_iv, pe_iv].select(&:positive?).then { |arr| arr.empty? ? 0.0 : (arr.sum / arr.size) }
+
+      ivs = chain[:oc].values.flat_map { |row| %w[ce pe].map { |k| row.dig(k, 'implied_volatility').to_f } }.reject(&:zero?)
+      return 0.5 if ivs.empty? || ivs.max == ivs.min
+
+      ((cur - ivs.min) / (ivs.max - ivs.min)).clamp(0, 1).round(2)
+    rescue StandardError
+      0.5
+    end
+
+    def determine_atm_strike(chain)
+      spot = chain[:last_price].to_f
+      chain[:oc].keys.map(&:to_f).min_by { |s| (s - spot).abs }
+    rescue StandardError
+      nil
+    end
+
+    def intraday_candles(inst)
+      DhanHQ::Models::HistoricalData.intraday(
+        security_id: inst.security_id,
+        exchange_segment: inst.exchange_segment,
+        instrument: inst.instrument_type,
+        interval: '5',
+        from_date: 5.days.ago.to_date.to_s,
+        to_date: Time.zone.today.to_s
+      )
+    rescue StandardError
+      []
+    end
+
+    def to_legacy_row(inst, chain, sel, expiry, side)
+      strike_f = sel[:strike_price].to_f
+      strike_key = format('%.6f', strike_f)
+      side_s     = side.to_s
+
+      node       = chain[:oc][strike_key]
+      side_node  = node && node[side_s]
+      return nil unless side_node
+
+      # Map to DB derivative
+      derivative = inst.derivatives.find_by(
+        strike_price: strike_f,
+        expiry_date: expiry,
+        option_type: side.to_s.upcase
+      )
+      return nil unless derivative
+
+      bid = side_node['top_bid_price'].to_f
+      ask = side_node['top_ask_price'].to_f
+      mid = [(bid + ask) / 2.0, sel[:last_price].to_f].compact.max
+      spread = ask.positive? && bid.positive? ? (ask - bid).abs : nil
+      spread_pct = mid.positive? && spread ? ((spread / mid) * 100.0) : nil
+
+      {
+        # legacy shape expected by Strategy loop
+        security_id: derivative.security_id,
+        symbol: derivative.symbol_name || inst.symbol_name,
+        cp: side.to_s.upcase.to_sym, # :CE / :PE
+        strike: strike_f,
+        ltp: sel[:last_price].to_f,
+        bid: bid,
+        ask: ask,
+        spread_pct: (spread_pct && spread_pct.round(3)) || 999.0,
+        volume: sel[:volume].to_i,
+        oi: sel[:oi].to_i,
+        iv: sel[:iv].to_f,
+        lot_size: derivative.lot_size || inst.lot_size,
+        exchange_segment: derivative.exchange_segment
+      }
+    end
+  end
+end
+
+
+# File: app/services/orders/analyzer.rb
+module Orders
+  class Analyzer < ApplicationService
+    def self.realized_pnl_for(security_id, segment)
+      pos = State::PositionCache.get(seg: segment, sid: security_id, prod: 'INTRADAY')
+      return 0.0 unless pos
+
+      Pnl::LiveCalculator.for_position(pos)[:unrealized].to_f # close enough until broker confirms
+    rescue StandardError
+      0.0
+    end
+  end
+end
+
+
+# File: app/services/orders/closer.rb
+# app/services/orders/closer.rb
+module Orders
+  class Closer < ApplicationService
+    def initialize(order:)
+      @order = order
+    end
+
+    def call
+      return unless @order&.super_ref.present?
+
+      DhanHQ::SuperOrders.close(super_order_id: @order.super_ref)
+      @order.update!(super_status: :closed)
+    end
+  end
+end
+
+
+# File: app/services/orders/executor.rb
+# app/services/orders/executor.rb
+module Orders
+  class Executor < ApplicationService
+    def initialize(instrument:, side:, qty:, entry_type:, risk_params:, client_ref:, entry_price: nil)
+      @instrument = instrument
+      @side = side
+      @qty = qty
+      @entry_type = entry_type
+      @risk_params = risk_params
+      @client_ref = client_ref
+      @entry_price = entry_price
+    end
+
+    def call
+      guard = Risk::Guard.new
+      raise 'Trading disabled' unless guard.trading_enabled?
+
+      PgLocks.with_lock("super:#{@instrument.id}") do
+        return Order.find_by(client_ref: @client_ref) if Order.exists?(client_ref: @client_ref)
+
+        params = Orders::SuperParamsBuilder.call(
+          instrument: @instrument,
+          side: @side,
+          qty: @qty,
+          entry_type: @entry_type,
+          entry_price: @entry_price,
+          sl_value: @risk_params[:sl_value],
+          tp_value: @risk_params[:tp_value],
+          trail_sl_value: @risk_params[:trail_sl_value],
+          trail_sl_jump: @risk_params[:trail_sl_jump],
+          client_ref: @client_ref
+        )
+
+        # Your gem call — adjust to your method signature / return shape
+        # Expected resp fields: :super_order_id, :avg_price (if provided by broker immediately)
+        resp = DhanHQ::SuperOrders.place(params)
+
+        Order.create!(
+          instrument_id: @instrument.id,
+          side: @side,
+          qty: @qty,
+          entry_type: Order.entry_types[@entry_type.to_s],
+          client_ref: @client_ref,
+          super_ref: resp[:super_order_id],
+          super_status: :submitted,
+          sl_value: params[:sl_value],
+          tp_value: params[:tp_value],
+          trail_sl_value: params[:trail_sl_value],
+          entry_price: resp[:avg_price]
+        )
+      end
+    end
+  end
+end
+
+
+# File: app/services/orders/manager.rb
+module Orders
+  class Manager < ApplicationService
+    def self.exit_position!(security_id:, segment:, reason:)
+      # Try to close Super Order first (if we have it)
+      if (ord = Order.find_by(super_status: %i[submitted modified],
+                              instrument_id: Derivative.find_by(security_id: security_id)&.instrument_id))
+        Orders::Closer.call(order: ord)
+      else
+        # Market close fallback – use Dhan plain order
+        begin
+          DhanHQ::Models::Order.create!(
+          transaction_type: 'SELL',
+          exchange_segment: segment,
+          product_type: 'INTRADAY',
+          order_type: 'MARKET',
+          validity: 'DAY',
+          security_id: security_id,
+          quantity: Derivative.find_by(security_id: security_id)&.lot_size || 1
+        )
+        rescue StandardError
+          nil
+        end
+      end
+      Rails.logger.info("[Orders::Manager] exit #{segment}:#{security_id} (#{reason})")
+    end
+  end
+end
+
+
+# File: app/services/orders/super_modifier.rb
+# app/services/orders/super_modifier.rb
+module Orders
+  class SuperModifier < ApplicationService
+    # Any of the new_* values may be nil; only send the ones you want to change.
+    def initialize(order:, new_sl_value: nil, new_tp_value: nil, new_trail_sl_value: nil)
+      @order = order
+      @new_sl = new_sl_value && PriceMath.round_tick(new_sl_value)
+      @new_tp = new_tp_value && PriceMath.round_tick(new_tp_value)
+      @new_trail = new_trail_sl_value && PriceMath.round_tick(new_trail_sl_value)
+    end
+
+    def call
+      return if @order&.super_ref.blank?
+
+      payload = {}
+
+      # Tighten-only policy (for long calls/puts):
+      # - SL is distance/level semantics vary across brokers; safest: only increase SL price if your convention = absolute price.
+      #   If you store SL as absolute premium level: tightening means moving SL *upwards* (closer to current) for long positions.
+      payload[:sl_value] = @new_sl if @new_sl && @order.sl_value && @new_sl >= @order.sl_value
+
+      # - TP can only be decreased (closer target), never widened outward.
+      payload[:tp_value] = @new_tp if @new_tp && @order.tp_value && @new_tp <= @order.tp_value
+
+      # - Trailing SL value can only be raised (tighter).
+      payload[:trail_sl_value] = @new_trail if @new_trail && (@order.trail_sl_value.nil? || @new_trail >= @order.trail_sl_value)
+
+      return if payload.empty?
+
+      resp = DhanHQ::SuperOrders.modify(
+        super_order_id: @order.super_ref,
+        **payload
+      )
+
+      # Update only on accept
+      @order.update!(
+        sl_value: payload[:sl_value] || @order.sl_value,
+        tp_value: payload[:tp_value] || @order.tp_value,
+        trail_sl_value: payload[:trail_sl_value] || @order.trail_sl_value,
+        super_status: :modified
+      )
+      resp
+    end
+  end
+end
+
+
+# File: app/services/orders/super_params_builder.rb
+# app/services/orders/super_params_builder.rb
+module Orders
+  class SuperParamsBuilder
+    # side: :buy or :sell
+    # entry_type: :market or :limit
+    def self.call(instrument:, side:, qty:, entry_type:, sl_value:, tp_value:, client_ref:, entry_price: nil, trail_sl_value: nil,
+                  trail_sl_jump: nil)
+      raise ArgumentError, 'qty must be positive' if qty.to_i <= 0
+
+      price = (entry_type.to_sym == :limit ? PriceMath.round_tick(entry_price) : nil)
+      raise ArgumentError, 'limit order requires a valid entry_price' if entry_type.to_sym == :limit && (price.nil? || price <= 0)
+
+      {
+        security_id: instrument.security_id,
+        exchange_segment: instrument.exchange_segment, # e.g., "NSE_FNO"
+        side: side.to_sym, # :buy / :sell
+        quantity: qty.to_i,
+        order_type: entry_type.to_sym, # :market / :limit
+        price: price, # nil for market
+        sl_value: PriceMath.round_tick(sl_value),
+        tp_value: PriceMath.round_tick(tp_value),
+        trail_sl_value: trail_sl_value && PriceMath.round_tick(trail_sl_value),
+        trail_sl_jump: trail_sl_jump && PriceMath.round_tick(trail_sl_jump),
+        client_ref: client_ref
+      }.compact
+    end
+  end
+end
+
+
+# File: app/services/pg_locks.rb
+module PgLocks
+  def self.with_lock(key)
+    lock_id = Zlib.crc32(key.to_s)
+    ActiveRecord::Base.connection.execute("SELECT pg_advisory_lock(#{lock_id})")
+    yield
+  ensure
+    ActiveRecord::Base.connection.execute("SELECT pg_advisory_unlock(#{lock_id})")
+  end
+end
+
+# File: app/services/pnl/live_calculator.rb
+module Pnl
+  class LiveCalculator
+    def self.for_position(pos)
+      # pos is a hash from PositionCache
+      ltp = Live::TickCache.ltp(pos[:seg], pos[:sid]).to_f
+      avg = (pos[:net_qty].to_i >= 0 ? pos[:buy_avg] : pos[:sell_avg]).to_f
+      qty = pos[:net_qty].to_i.abs
+
+      # For options, multiply by lot size (lookup from Instrument/Derivative) if you want total ₹
+      lot = pos[:lot_size] || 1
+      direction = pos[:net_qty].to_i >= 0 ? +1 : -1
+      unreal = (ltp - avg) * qty * lot * direction
+      { ltp:, unrealized: unreal.round(2) }
+    end
+  end
+end
+
+# File: app/services/portfolio/sync.rb
+module Portfolio
+  class Sync < ApplicationService
+    def call
+      sync_holdings
+      sync_positions
+    end
+
+    def sync_holdings
+      arr = DhanHQ::Models::Holding.all # => array of hashes per API
+      Array(arr).each do |h|
+        Holding
+          .find_or_initialize_by(exchange: h.exchange, security_id: h.security_id)
+          .update!(
+            trading_symbol: h.trading_symbol,
+            isin: h.isin,
+            total_qty: h.total_qty,
+            dp_qty: h.dp_qty,
+            t1_qty: h.t1_qty,
+            available_qty: h.available_qty,
+            collateral_qty: h.collateral_qty,
+            avg_cost_price: h.avg_cost_price
+          )
+      end
+    rescue DhanHQ::InternalServerError => e
+      Rails.logger.error("Failed to sync holdings: #{e.message}")
+      []
+    end
+
+    def sync_positions
+      arr = DhanHQ::Models::Position.all
+
+      Array(arr).each do |p|
+        pp p
+        Position
+          .find_or_initialize_by(exchange_segment: p.exchange_segment, security_id: p.security_id)
+          .update!(
+            dhan_client_id: p.dhan_client_id,
+            trading_symbol: p.trading_symbol,
+            position_type: p.position_type,
+            product_type: p.product_type,
+            buy_avg: p.buy_avg,
+            buy_qty: p.buy_qty,
+            cost_price: p.cost_price,
+            sell_avg: p.sell_avg,
+            sell_qty: p.sell_qty,
+            net_qty: p.net_qty,
+            realized_profit: p.realized_profit,
+            unrealized_profit: p.unrealized_profit,
+            rbi_reference_rate: p.rbi_reference_rate,
+            multiplier: p.multiplier,
+            carry_forward_buy_qty: p.carry_forward_buy_qty,
+            carry_forward_sell_qty: p.carry_forward_sell_qty,
+            carry_forward_buy_value: p.carry_forward_buy_value,
+            carry_forward_sell_value: p.carry_forward_sell_value,
+            day_buy_qty: p.day_buy_qty,
+            day_sell_qty: p.day_sell_qty,
+            day_buy_value: p.day_buy_value,
+            day_sell_value: p.day_sell_value,
+            drv_expiry_date: begin
+              Date.parse(p.drv_expiry_date)
+            rescue StandardError
+              nil
+            end,
+            drv_option_type: p.drv_option_type,
+            drv_strike_price: p.drv_strike_price,
+            cross_currency: p.cross_currency
+          )
+      end
+    end
+  end
+end
+
+# File: app/services/price_math.rb
+module PriceMath
+  TICK = 0.05
+
+  def self.round_tick(x)
+    return nil if x.nil?
+
+    ((x.to_f / TICK).round * TICK).round(2)
+  end
+
+  def self.floor_tick(x)
+    ((x.to_f / TICK).floor * TICK).round(2)
+  end
+
+  def self.ceil_tick(x)
+    ((x.to_f / TICK).ceil * TICK).round(2)
+  end
+
+  def self.valid_tick?(x)
+    # Avoid float fuzziness: work in paise
+    ((x.to_f * 100).round % (TICK * 100).to_i).zero?
+  end
+end
+
+# File: app/services/regime/chop_detector.rb
+# app/services/regime/chop_detector.rb
+# Detects sideways/range conditions using lightweight signals from CandleSeries.
+class Regime::ChopDetector
+  # Any 2 true ⇒ choppy
+  # cs5/cs15 are CandleSeries instances (5m/15m) you already have.
+  def self.choppy_pre_entry?(cs5, cs15, opts = {})
+    adx_th    = (opts[:adx_min] || 18).to_i
+    atr_mult  = (opts[:atr_quiet_mult] || 0.8).to_f
+    cross_win = (opts[:vwap_cross_window] || 30).to_i
+
+    low_adx   = safe { cs5.adx(14) }&.<(adx_th) || false
+    quiet_atr = begin
+      atr_now  = safe { cs5.atr(5) } || 0.0
+      atr_med  = safe { cs5.atr(5).median(50) } || atr_now
+      atr_now > 0 && atr_med > 0 && (atr_now < atr_med * atr_mult)
+    rescue StandardError
+      false
+    end
+    vwap_x    = vwap_crossings(cs5, cross_win) >= 3
+    nr5       = narrow_range?(cs5, 5)
+
+    [low_adx, quiet_atr, vwap_x, nr5].count(true) >= 2
+  end
+
+  # ---- helpers ----
+
+  def self.vwap_crossings(cs, window)
+    vwap = safe { cs.vwap_series(window: window) } # preferred if you have it
+    closes = safe { cs.close_series(window: window) }
+    if vwap && closes && vwap.size == closes.size && vwap.size > 1
+      signs = closes.zip(vwap).map { |c, v| (c <=> v) } # -1, 0, 1
+      signs.each_cons(2).count { |a, b| (a <=> b) == -1 || (a <=> b) == 1 }
+    else
+      # Fallback: approximate with current vwap line if only one value
+      0
+    end
+  rescue StandardError
+    0
+  end
+
+  def self.narrow_range?(cs, n)
+    # NR(n): current bar range <= min range of last n bars
+    bars = safe { cs.last_n(n + 1) } || []
+    return false unless bars.size >= 2
+
+    rng = ->(b) { (b[:high] - b[:low]).to_f }
+    cur = rng.call(bars.last)
+    hist = bars[0...-1].map(&rng)
+    cur <= hist.min
+  rescue StandardError
+    false
+  end
+
+  def self.safe(&)
+    yield
+  rescue StandardError
+    nil
+  end
+end
+
+
+# File: app/services/risk/guard.rb
+module Risk
+  class Guard
+    DEFAULT_MAX_TICK_AGE = 5 # seconds
+
+    def trading_enabled?
+      Setting.fetch_bool('trading_enabled', true)
+    end
+
+    def per_trade_risk_rupees
+      Setting.fetch_i('risk.per_trade_rupees', 0)
+    end
+
+    def daily_loss_cap_rupees
+      Setting.fetch_i('risk.daily_loss_cap_rupees', 0)
+    end
+
+    def max_trades_per_day
+      Setting.fetch_i('risk.max_trades_per_day', 0)
+    end
+
+    # ---- Gates ----
+
+    # Returns [allowed(Boolean), reason(String)]
+    # expected_risk_rupees: how much you'd risk if this entry is placed (use per_trade_risk_rupees)
+    # seg/sid: instrument identifiers for staleness check
+    def entry_allowed?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
+      return [false, 'trading_disabled'] unless trading_enabled?
+
+      return [false, 'ticks_stale'] if stale?(seg:, sid:, max_age: max_tick_age)
+
+      return [false, 'max_trades_reached'] unless trade_budget_ok?
+
+      return [false, 'daily_loss_cap'] unless daily_loss_ok?(expected_risk_rupees: expected_risk_rupees)
+
+      [true, 'ok']
+    end
+
+    # Alias for simpler boolean interface
+    # Returns true if entry is allowed, false otherwise
+    def ok_to_enter?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
+      allowed, _reason = entry_allowed?(expected_risk_rupees: expected_risk_rupees, seg: seg, sid: sid, max_tick_age: max_tick_age)
+      allowed
+    end
+
+    # Freshness of ticks
+    def stale?(seg:, sid:, max_age: DEFAULT_MAX_TICK_AGE)
+      tick = begin
+        Live::TickCache.get(seg, sid)
+      rescue StandardError
+        nil
+      end
+      return true unless tick && tick[:ts].is_a?(Time)
+
+      (Time.zone.now - tick[:ts]) > max_age
+    end
+
+    # New entry should not push realized losses beyond the cap
+    # Rule: remaining_loss_budget >= expected_risk
+    def daily_loss_ok?(expected_risk_rupees:)
+      cap  = [daily_loss_cap_rupees, 0].max
+      loss = realized_loss_today_abs
+      remaining = cap - loss
+      remaining >= expected_risk_rupees.to_i
+    end
+
+    def trade_budget_ok?
+      # Count entries (orders) created today; adjust scope if you count positions instead
+      taken = Order.where('created_at::date = ?', Date.current).count
+      taken < max_trades_per_day
+    end
+
+    # ---- Helpers ----
+
+    # Absolute value of today's realized loss (rupees); profits don't increase budget
+    def realized_loss_today_abs
+      pnl = Position.where(state: :closed)
+                    .where('updated_at::date = ?', Date.current)
+                    .sum(:realized_pnl).to_f
+      pnl.negative? ? pnl.abs : 0.0
+    end
+  end
+end
+
+
+# File: app/services/risk/scalp_params.rb
+# app/services/risk/scalp_params.rb
+# Convenience wrapper for building scalp or momentum params.
+class Risk::ScalpParams
+  def self.for(entry_premium:, mode:)
+    case mode
+    when :scalp
+      Risk::ToSuperParams.call(
+        entry_premium: entry_premium,
+        sl_pct: 0.25,  # keep risk constant
+        tp_pct: 0.30,  # smaller, grab-able TP
+        trail_pct: 0.18,
+        trail_jump_pct: 0.10
+      )
+    else # :momentum (default)
+      Risk::ToSuperParams.call(
+        entry_premium: entry_premium,
+        sl_pct: 0.25,
+        tp_pct: 0.50,
+        trail_pct: 0.20,
+        trail_jump_pct: 0.10
+      )
+    end
+  end
+end
+
+
+# File: app/services/risk/to_super_params.rb
+# app/services/risk/to_super_params.rb
+class Risk::ToSuperParams
+  # sl/tp/trail/jump are ABSOLUTE premium values derived from entry premium
+  def self.call(entry_premium:, sl_pct: 0.25, tp_pct: 0.50, trail_pct: 0.20, trail_jump_pct: 0.10)
+    ep = entry_premium.to_f
+    raise ArgumentError, 'entry_premium must be > 0' if ep <= 0
+
+    sl   = [PriceMath.round_tick(ep * sl_pct),   0.05].max
+    tp   = [PriceMath.round_tick(ep * tp_pct),   0.05].max
+    tval = [PriceMath.round_tick(ep * trail_pct), 0.05].max
+    tjmp = [PriceMath.round_tick(ep * trail_jump_pct), 0.05].max
+
+    {
+      sl_value: sl,
+      tp_value: tp,
+      trail_sl_value: tval,
+      trail_sl_jump: tjmp
+    }
+  end
+end
+
+
+# File: app/services/runner/auto_pilot.rb
+# frozen_string_literal: true
+
+module Runner
+  class AutoPilot < ApplicationService
+    WINDOW = { start: '09:20', stop: '15:15' }.freeze
+
+    MODE = Struct.new(:name, :tf, :adx_min, :profit_arm_pct, :time_stop_s, :scalp,
+                      keyword_init: true)
+
+    NORMAL = MODE.new(
+      name: :normal, tf: '5', adx_min: 20, profit_arm_pct: 0.01, time_stop_s: 480, scalp: false
+    )
+    SCALP = MODE.new(
+      name: :scalp, tf: '3', adx_min: 16, profit_arm_pct: 0.01, time_stop_s: 240, scalp: true
+    )
+
+    def initialize(symbols:, mode: :normal, roster: nil)
+      @symbols = Array(symbols).presence || %w[NIFTY BANKNIFTY]
+      @mode    = (mode.to_s == 'scalp' ? SCALP : NORMAL)
+      @roster  = roster || @symbols
+      @running = Concurrent::AtomicBoolean.new(false)
+      @last_entry_at = {}
+    end
+
+    def call
+      start!
+    end
+
+    def start!
+      return if @running.true?
+
+      @running.make_true
+      Live::WsHub.instance.start!(mode: :quote)
+      subscribe_underlyings!
+
+      # Kick off bars loop (fetch 5m/3m series) and trade loop
+      @thread = Thread.new { main_loop }
+      self
+    end
+
+    def stop!
+      @running.make_false
+      @thread&.kill
+      self
+    end
+
+    private
+
+    def main_loop
+      loop do
+        break unless @running.true?
+
+        now = Time.zone.now
+        run_once if inside_session?(now)
+        sleep 10 # light cadence; bars fetch is heavier below
+      end
+    end
+
+    def run_once
+      # Pull series for each symbol on the configured TF
+      Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
+        process_symbol(sym, series)
+      end
+      sleep 12 # let one fetch cycle finish; guard against tight loops
+      Bars::FetchLoop.stop
+    end
+
+    def process_symbol(sym, series)
+      return if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
+
+      trend = holy_or_supertrend(series)
+      return if %i[side neutral].include?(trend)
+
+      inst = fetch_instrument(sym)
+      return unless inst
+
+      side = (trend == :up ? :ce : :pe)
+      leg  = Options::ChainAnalyzer.call(underlying: inst, side: side, config: { strategy_type: (@mode.scalp ? 'intraday' : 'intraday') })
+      return unless leg && leg[:ltp].to_f > 0
+
+      # Budget/guard: 30% capital per trade; expect ~1R equal to 10% of premium baseline
+      qty = leg[:lot_size].to_i
+      return if qty <= 0
+
+      # Skip repeated entries too fast
+      return if entered_recently?(sym)
+
+      sl, tp, trail = rr_for(inst, leg, series)
+      return unless risk_ok?(inst, expected_risk_rupees: qty * leg[:ltp] * 0.10) # ~10% of premium
+
+      place_super(inst, side, qty, sl: sl, tp: tp, trail: trail)
+      @last_entry_at[sym] = Time.current
+    rescue StandardError => e
+      Rails.logger.warn("[AutoPilot] #{sym} #{e.class}: #{e.message}")
+    end
+
+    def rr_for(inst, leg, series)
+      # ATR% → map to SL/TP/trail like your AlertProcessors did
+      atr = begin
+        series.atr(20)
+      rescue StandardError
+        nil
+      end
+      atr_pct = if atr && (c = series.closes.last).to_f > 0
+                  atr.to_f / c.to_f
+                end
+
+      if atr_pct && atr_pct > 0
+        sl_pct    = [[atr_pct * 2.0, 0.05].max, 0.18].min
+        tp_pct    = [[atr_pct * 4.0, 0.10].max, 0.40].min
+        trail_pct = [[atr_pct, 0.03].max, 0.12].min
+      else
+        sl_pct = 0.10
+        tp_pct = 0.20
+        trail_pct = 0.03 # defaults
+      end
+
+      price = leg[:ltp].to_f
+      [
+        (price * (1 - sl_pct)),
+        (price * (1 + tp_pct)),
+        (price * trail_pct)
+      ].map { |x| PriceMath.round_tick(x) }
+    end
+
+    def place_super(inst, side, qty, sl:, tp:, trail:)
+      client_ref = "AP-#{inst.security_id}-#{side}-#{Time.now.to_i}"
+      params = Orders::SuperParamsBuilder.call(
+        instrument: inst,
+        side: :buy,
+        qty: qty,
+        entry_type: :market,
+        sl_value: sl,
+        tp_value: tp,
+        trail_sl_value: (trail.positive? ? trail : nil),
+        trail_sl_jump: (trail.positive? ? trail : nil),
+        client_ref: client_ref
+      )
+      Rails.logger.info("[AutoPilot] Super params → #{params}")
+      # Place or dry-run
+      if Setting.fetch_bool('PLACE_ORDER', false)
+        order = Orders::Executor.call(
+          instrument: inst, side: :buy, qty: qty, entry_type: :market,
+          risk_params: { sl_value: sl, tp_value: tp, trail_sl_value: trail, trail_sl_jump: trail },
+          client_ref: client_ref
+        )
+        # subscribe the derivative as well
+        begin
+          Live::WsHub.instance.subscribe(seg: order.instrument.exchange_segment, sid: order.instrument.security_id.to_s)
+        rescue StandardError
+          nil
+        end
+        register_for_management(order, inst.symbol_name, side: side)
+      else
+        notify("💡 DRYRUN SUPER PARAMS\n#{params.inspect}", tag: 'DRYRUN')
+      end
+    end
+
+    def register_for_management(order, underlying, side:)
+      # Attach into PositionGuard
+      intent = {
+        security_id: order.instrument.security_id,
+        exchange_segment: order.instrument.exchange_segment,
+        entry_price: order.entry_price || 0.0,
+        underlying_symbol: underlying
+      }
+      Execution::PositionGuard.register_intent(intent)
+      # micro‑TP manager can be scheduled via a simple timer on each tick too (optional)
+    end
+
+    # ----- helpers -----
+    def subscribe_underlyings!
+      @symbols.each do |sym|
+        inst = fetch_instrument(sym)
+        Live::WsHub.instance.subscribe(seg: inst.exchange_segment, sid: inst.security_id.to_s) if inst
+      end
+    end
+
+    def holy_or_supertrend(series)
+      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series))
+      case hg&.bias
+      when :bullish then :up
+      when :bearish then :down
+      else :side
+      end
+    rescue StandardError
+      # fallback: simple supertrend compare
+      st = Indicators::Supertrend.new(series: series).call
+      return :side if st.empty?
+
+      series.closes.last > st.last ? :up : :down
+    end
+
+    def to_dhan_hash(series)
+      {
+        'timestamp' => series.candles.map { |c| c.timestamp.to_i },
+        'open' => series.opens,
+        'high' => series.highs,
+        'low' => series.lows,
+        'close' => series.closes,
+        'volume' => series.candles.map(&:volume)
+      }
+    end
+
+    def fetch_instrument(sym)
+      Instrument.segment_index.find_by(symbol_name: sym) || Instrument.segment_equity.find_by(display_name: sym)
+    end
+
+    def risk_ok?(inst, expected_risk_rupees:)
+      Risk::Guard.new.ok_to_enter?(expected_risk_rupees: expected_risk_rupees.to_i,
+                                   seg: inst.exchange_segment, sid: inst.security_id.to_s)
+    end
+
+    def entered_recently?(sym)
+      t = @last_entry_at[sym]
+      t && (Time.current - t) < 90 # cool‑down 90s per underlying
+    end
+
+    def inside_session?(now = Time.zone.now)
+      t1 = Time.zone.parse(WINDOW[:start])
+      t2 = Time.zone.parse(WINDOW[:stop])
+      now.between?(t1, t2) && MarketCalendar.trading_day?(now.to_date)
+    end
+
+    def tf_for(tf)
+      { '1' => '1m', '3' => '3m', '5' => '5m', '15' => '15m' }[tf.to_s] || '5m'
+    end
+  end
+end
+
+
+# File: app/services/runner/mtf_loop.rb
+# frozen_string_literal: true
+
+module Runner
+  class MtfLoop
+    class << self
+      def start(symbols:, timeframe: '15m')
+        stop
+        @running = true
+        Rails.logger.info("[Mtf] loop start #{symbols.join(', ')} @#{timeframe}")
+
+        Bars::FetchLoop.start(timeframe: timeframe, symbols: symbols) do |symbol, _series|
+          break unless @running
+
+          begin
+            inst = Instrument.segment_index.find_by(symbol_name: symbol) || Instrument.segment_equity.find_by(display_name: symbol)
+            next unless inst
+
+            sig = Strategy::MtfSmcEntry.call(inst)
+            next unless sig
+
+            # pick option leg
+            leg = Strategy::OptionLocator.new(symbol).atm_leg_for(sig.direction == :bullish ? :bullish : :bearish)
+
+            # sizing (use your existing sizing module)
+            budget = Scalp::Budget.current || Scalp::Budget.new(ScalpSession.today!)
+            sizing = Scalp::Sizing.for(leg, budget: budget)
+
+            next if sizing.qty <= 0 || !budget.can_trade?
+
+            # # place order
+            # intent = Execution::DhanRouter.place_super_order!(leg, sizing)
+
+            # # subscribe ticks for exit/trailing
+            # Live::WsHub.instance.subscribe(seg: leg.exchange_segment, sid: leg.security_id)
+
+            # # register with guard
+            # Execution::PositionGuard.instance.register(
+            #   pos_id: nil, # if you persist immediately, pass id
+            #   exchange_segment: leg.exchange_segment,
+            #   security_id: leg.security_id,
+            #   entry: intent.entry_price,
+            #   qty: sizing.qty,
+            #   sl_pct: sizing.sl_pct, tp_pct: sizing.tp_pct, trail_pct: sizing.trail_pct,
+            #   placed_as: 'super', super_order_id: intent.broker_order_id
+            # )
+
+            Rails.logger.info("[Mtf] #{symbol} #{sig.direction.upcase} -> leg=#{leg.security_id} why=#{sig.why}")
+          rescue StandardError => e
+            Rails.logger.error("[Mtf] fail #{symbol}: #{e.class} #{e.message}")
+            Rails.logger.error(
+              "[MTF] fail #{symbol}: #{e.class} #{e.message}\n" \
+              "#{(e.backtrace || [])[0, 8].join("\n")}"
+            )
+          end
+        end
+      end
+
+      def stop
+        @running = false
+        Bars::FetchLoop.stop
+      end
+    end
+  end
+end
+
+
+# File: app/services/runner/positions_loop.rb
+# app/services/runner/positions_loop.rb (inside loop, when you have p, ltp)
+Positions::Manager.call(position: p)
+Exits::MicroTP.call(
+  order: p.order,
+  ltp: ltp,
+  entry_ts: p.created_at,
+  side: (if p.order&.side&.to_sym == :buy
+           p.option_call? ? :buy_ce : :buy_pe
+         else
+           :unknown
+         end)
+)
+
+# app/services/runner/positions_loop.rb
+module Runner
+  class PositionsLoop
+    INTERVAL = 0.5 # seconds
+    TZ       = 'Asia/Kolkata'
+
+    def initialize
+      @risk    = Risk::Guard.new
+      @running = false
+    end
+
+    def start
+      return if @running
+
+      @running = true
+      @thread = Thread.new { run! }
+      @thread
+    end
+
+    def stop
+      @running = false
+      @thread&.join(1)
+    end
+
+    private
+
+    def run!
+      Thread.current.name = begin
+        'PositionsLoop'
+      rescue StandardError
+        nil
+      end
+      loop do
+        break unless @running
+
+        begin
+          Position.open.includes(:order, :instrument).find_each do |p|
+            manage_position(p)
+          end
+        rescue StandardError => e
+          Rails.logger.error("[PositionsLoop] #{e.class} #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}")
+        ensure
+          sleep INTERVAL
+        end
+      end
+      Rails.logger.info('[PositionsLoop] stopped')
+    end
+
+    def manage_position(p)
+      ins = p.instrument
+      ltp = Live::TickCache.ltp(ins.exchange_segment, ins.security_id)
+      return unless ltp
+
+      # update unrealized P&L in rupees for options buying (premium delta * qty)
+      entry = p.entry_price.to_f.nonzero? || p.order&.entry_price.to_f
+      qty   = p.order&.qty.to_i
+      if entry && entry > 0 && qty > 0
+        p.unrealized_pnl = (ltp.to_f - entry) * qty
+        p.save! if p.changed?
+      end
+
+      # trailer + micro TP / BE (tighten-only)
+      Orders::SuperModifier.call(order: p.order) # no-op if nothing to change
+      Exits::MicroTP.call(order: p.order, ltp: ltp, entry_ts: p.created_at, side: infer_side(p))
+
+      # hard-flat if placing another loss would breach cap is not enough;
+      # here we protect against live drawdown crossing the cap immediately:
+      hard_flat_if_cap_breached!
+    end
+
+    def infer_side(p)
+      # For long options we buy premium; if you store CE/PE, wire this properly.
+      :buy_ce
+    end
+
+    def hard_flat_if_cap_breached!
+      cap  = @risk.daily_loss_cap_rupees
+      loss = @risk.realized_loss_today_abs
+      # approximate unrealized loss across all open positions (only negative P&L counts)
+      unreal = Position.open.sum('LEAST(unrealized_pnl, 0)').to_f.abs
+      return unless (loss + unreal) >= cap && cap > 0
+
+      Rails.logger.warn("[HARD-FLAT] Daily cap breached (#{loss + unreal} >= #{cap}) → closing all + disabling trading")
+      flatten_all!
+      Setting.put('trading_enabled', 'false')
+    end
+
+    def flatten_all!
+      Position.open.includes(:order).find_each do |p|
+        Orders::Closer.call(order: p.order) if p.order&.super_ref.present?
+      rescue StandardError => e
+        Rails.logger.error("[HARD-FLAT] close failed pos=#{p.id} #{e.class} #{e.message}")
+      end
+    end
+  end
+end
+
+
+# File: app/services/runner/recent_signals.rb
+# app/services/runner/recent_signals.rb
+module Runner
+  class RecentSignals
+    KEY = 'recent_signals'
+
+    # store a short-lived fingerprint per underlying (e.g., 30s)
+    def self.seen?(underlying_id:, fingerprint:, ttl: 30)
+      key = "#{KEY}:#{underlying_id}:#{fingerprint}"
+      already = Rails.cache.exist?(key)
+      Rails.cache.write(key, true, expires_in: ttl)
+      already
+    end
+  end
+end
+
+
+# File: app/services/runner/strategy_loop.rb
+# app/services/runner/strategy_loop.rb (inside eval_instrument, before placing order)
+cs5  = CandleSeries.for(ins, '5m')
+cs15 = CandleSeries.for(ins, '15m')
+
+scalp_mode = Regime::ChopDetector.choppy_pre_entry?(cs5, cs15)
+
+entry_premium = opt[:ltp].to_f
+risk_params   = Risk::ScalpParams.for(
+  entry_premium: entry_premium,
+  mode: scalp_mode ? :scalp : :momentum
+)
+
+Orders::Executor.call(
+  instrument: Instrument.find_by(security_id: opt[:security_id]),
+  side: :buy,
+  qty: qty,
+  entry_type: :market,
+  risk_params: risk_params,
+  client_ref: "super:#{ins.id}:#{Time.now.to_i}:#{SecureRandom.hex(3)}"
+)
+
+# app/services/runner/strategy_loop.rb
+module Runner
+  class StrategyLoop
+    TICK      = 0.25 # seconds between scans
+    TZ        = 'Asia/Kolkata'
+
+    def initialize(instruments:)
+      @instruments = Array(instruments)
+      @risk        = Risk::Guard.new
+      @running     = false
+    end
+
+    def start
+      return if @running
+
+      @running = true
+      @thread = Thread.new { run! }
+      @thread
+    end
+
+    def stop
+      @running = false
+      @thread&.join(1)
+    end
+
+    private
+
+    def run!
+      Thread.current.name = begin
+        'StrategyLoop'
+      rescue StandardError
+        nil
+      end
+      loop do
+        break unless @running
+
+        begin
+          break unless @risk.trading_enabled?
+          next unless within_trade_window?
+
+          @instruments.each do |ul|
+            eval_underlying(ul)
+          end
+        rescue StandardError => e
+          Rails.logger.error("[StrategyLoop] #{e.class} #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}")
+        ensure
+          sleep TICK
+        end
+      end
+      Rails.logger.info('[StrategyLoop] stopped')
+    end
+
+    def within_trade_window?
+      Time.use_zone(TZ) do
+        now  = Time.zone.now
+        wnd1 = now.change(hour: 9,  min: 20)..now.change(hour: 11, min: 15)
+        wnd2 = now.change(hour: 13, min: 30)..now.change(hour: 15, min: 5)
+        wnd1.cover?(now) || wnd2.cover?(now)
+      end
+    end
+
+    def eval_underlying(ul)
+      # staleness gate (on underlying symbol/index)
+      if @risk.stale?(seg: ul.exchange_segment, sid: ul.security_id)
+        Rails.logger.debug { "[StrategyLoop] stale ticks for #{ul.symbol}, skipping" }
+        return
+      end
+
+      # strategy compute on last closed bar (1m)
+      cs1  = CandleSeries.for(ul, '1m')
+      bar  = cs1.last_bar
+      strat = Strategy::Router.for(ul)
+      strat.on_bar(bar: bar)
+
+      sig = strat.entry_signal
+      return unless sig # no entry
+
+      # trade budget gate + daily-loss gate
+      ok, reason = @risk.entry_allowed?(
+        expected_risk_rupees: @risk.per_trade_risk_rupees,
+        seg: ul.exchange_segment, sid: ul.security_id
+      )
+      unless ok
+        Rails.logger.info("[ENTRY-BLOCKED] #{ul.symbol} reason=#{reason}")
+        return
+      end
+
+      # ensure at most one order per signal fingerprint (15m ST state + side)
+      fp = signal_fingerprint(ul: ul, sig: sig)
+      if Runner::RecentSignals.seen?(underlying_id: ul.id, fingerprint: fp, ttl: 30)
+        Rails.logger.debug { "[StrategyLoop] duplicate signal suppressed #{ul.symbol} fp=#{fp}" }
+        return
+      end
+
+      # choose CE/PE strike (ATM±1 with filters)
+      cp  = (sig.side == :buy_ce ? :ce : :pe)
+      opt = Options::ChainAnalyzer.call(underlying: ul, side: cp)
+      unless opt
+        Rails.logger.info("[StrategyLoop] no viable option for #{ul.symbol} side=#{cp}")
+        return
+      end
+
+      # size by rupees risk
+      qty = Sizing.qty_for_rupees_risk(
+        premium: opt[:ltp].to_f,
+        lot_size: opt[:lot_size].to_i,
+        sl_pct: 0.25,
+        per_trade_rupees: @risk.per_trade_risk_rupees
+      )
+      if qty <= 0
+        Rails.logger.info("[StrategyLoop] qty=0 for #{ul.symbol} (risk too small vs lot)")
+        return
+      end
+
+      # scalp vs momentum risk params
+      cs5  = CandleSeries.for(ul, '5m')
+      cs15 = CandleSeries.for(ul, '15m')
+      scalp_mode = Regime::ChopDetector.choppy_pre_entry?(cs5, cs15)
+      entry_premium = opt[:ltp].to_f
+      risk_params = Risk::ScalpParams.for(entry_premium: entry_premium, mode: (scalp_mode ? :scalp : :momentum))
+
+      # final send (market entry by default)
+      client_ref = "super:#{ul.id}:#{Time.now.to_i}:#{SecureRandom.hex(3)}"
+      Orders::Executor.call(
+        instrument: Instrument.find_by(security_id: opt[:security_id]),
+        side: :buy,
+        qty: qty,
+        entry_type: :market, # or :limit with entry_price rounded to 0.05
+        risk_params: risk_params,
+        client_ref: client_ref
+      )
+
+      Rails.logger.info("[ENTRY] #{ul.symbol} #{sig.side} scalp=#{scalp_mode} ltp=#{entry_premium} qty=#{qty} ref=#{client_ref}")
+    end
+
+    def signal_fingerprint(ul:, sig:)
+      # keep it simple, include side + minute timestamp
+      t = Time.now.utc.strftime('%Y%m%d%H%M')
+      "#{ul.id}:#{sig.side}:#{t}"
+    end
+  end
+end
 
 
 # File: app/services/scalp/budget.rb
@@ -2056,6 +4531,23 @@ module Scalp
     end
   end
 end
+
+# File: app/services/sizing.rb
+# app/services/sizing.rb
+module Sizing
+  # qty in contracts (lot-sized)
+  def self.qty_for_rupees_risk(premium:, lot_size:, per_trade_rupees:, sl_pct: 0.25)
+    return 0 if premium.to_f <= 0 || lot_size.to_i <= 0 || per_trade_rupees.to_i <= 0
+
+    sl_points = PriceMath.round_tick(premium.to_f * sl_pct.to_f)
+    per_lot_risk = sl_points * lot_size.to_i
+    return 0 if per_lot_risk <= 0
+
+    lots = (per_trade_rupees.to_i / per_lot_risk).floor
+    [lots, 1].max * lot_size.to_i
+  end
+end
+
 
 # File: app/services/smc/bos.rb
 # SMC Component: Break of Structure (BOS)
@@ -2824,6 +5316,87 @@ end
 
 
 
+# File: app/services/strategy/mtf_smc_entry.rb
+# frozen_string_literal: true
+
+module Strategy
+  class MtfSmcEntry
+    Result = Struct.new(:direction, :why, :meta, keyword_init: true) # direction: :bullish/:bearish
+
+    def self.call(instrument)
+      s = Mtf::SeriesLoader.load(instrument: instrument, base_interval: '5')
+      return nil unless s&.h4 && s.h1 && s.m15
+
+      # 4H: Direction / Key levels / S&D
+      bias = case Mtf::Structure.trend(s.h4, lookback: 8)
+             when :up   then :bullish
+             when :down then :bearish
+             else :none
+             end
+
+      Rails.logger.debug { "#{instrument.symbol_name}: #{bias}" }
+      return nil if bias == :none
+
+      # 1H: Trend + BOS or CHOCH near OB/Fvg/liquidity
+      h1_trend = Mtf::Structure.trend(s.h1, lookback: 6)
+      bos      = Mtf::Structure.bos(s.h1, dir: (bias == :bullish ? :up : :down))
+      choch    = Mtf::Structure.choch(s.h1, prior_dir: (bias == :bullish ? :down : :up))
+      ob_zone  = Mtf::OrderBlock.last_before_bos(s.h1, bos)
+      fvg_list = Mtf::Fvg.scan(s.h1, lookback: 40)
+      pools    = (bias == :bullish ? Mtf::Liquidity.equal_lows(s.h1) : Mtf::Liquidity.equal_highs(s.h1))
+
+      # Require context alignment: trend or BOS/CHOCH in bias direction
+      aligned = (h1_trend == (bias == :bullish ? :up : :down)) || bos || choch
+      return nil unless aligned
+
+      # 15m: Confirmation (BOS + pullback to OB/Fvg or reaction at liquidity)
+      m15_bos = Mtf::Structure.bos(s.m15, dir: (bias == :bullish ? :up : :down))
+      return nil unless m15_bos
+
+      last_price = s.m15.candles.last.close
+      confirm =
+        if ob_zone && Mtf::OrderBlock.price_touches?(ob_zone, last_price)
+          :ob_touch
+        elsif (gap = fvg_list.last) && Mtf::Fvg.price_in_gap?(gap, last_price)
+          :fvg_retrace
+        elsif (pool = pools.last) && ((bias == :bullish && last_price >= pool.level) || (bias == :bearish && last_price <= pool.level))
+          :liquidity_sweep
+        else
+          :bos_only
+        end
+
+      # Extra filter: Supertrend & ADX on 15m
+      st_sig = s.m15.supertrend_signal
+      strong = begin
+        ta = TechnicalAnalysis::Adx.calculate(s.m15.hlc, period: 14).first&.adx.to_f
+        ta >= 18
+      rescue StandardError
+        true
+      end
+      return nil unless strong &&
+                        ((bias == :bullish && st_sig == :long_entry) || (bias == :bearish && st_sig == :short_entry))
+
+      Result.new(
+        direction: (bias == :bullish ? :bullish : :bearish),
+        why: "4H=#{bias} 1H_trend=#{h1_trend} 15m=#{confirm}",
+        meta: { bos: !!bos, choch: !!choch, ob: !!ob_zone, fvg: fvg_list.any?, pools: pools.any? }
+      )
+    end
+  end
+end
+
+
+# File: app/services/strategy/router.rb
+# frozen_string_literal: true
+
+class Strategy::Router
+  def self.for(instrument)
+    # Feature flag or config lookup could live here
+    Strategies::SupertrendContinuation.new(instrument: instrument, tf: '5m')
+  end
+end
+
+
 # File: app/services/telegram_notifier.rb
 # frozen_string_literal: true
 
@@ -2850,6 +5423,189 @@ class TelegramNotifier
     res
   rescue StandardError => e
     Rails.logger.error("Telegram #{method} error: #{e.message}")
+  end
+end
+
+
+# File: app/strategies/base_strategy.rb
+# frozen_string_literal: true
+
+class BaseStrategy
+  attr_reader :instrument, :tf, :settings
+
+  def initialize(instrument:, tf: '5m', settings: {})
+    @instrument = instrument
+    @tf = tf
+    @settings = settings
+    @last_signal_at = nil
+  end
+
+  # Called on every new bar close
+  def on_bar(bar:)
+    # override
+  end
+
+  # Return a SignalStruct or nil
+  def entry_signal
+    nil
+  end
+
+  # Return a SignalStruct or nil (given active position side)
+  def exit_signal(position_side:, entry_at:, ltp:)
+    nil
+  end
+
+  protected
+
+  def recent_signal_cooldown?(seconds:)
+    return false unless @last_signal_at
+
+    (Time.now - @last_signal_at) < seconds
+  end
+
+  def mark_signal!
+    @last_signal_at = Time.now
+  end
+end
+
+
+# File: app/strategies/signal.rb
+# frozen_string_literal: true
+
+SignalStruct = Struct.new(
+  :type,       # :entry or :exit
+  :side,       # :buy_ce / :buy_pe or :close
+  :reason,     # short string
+  :confidence, # 0.0..1.0
+  :context,    # hash of indicator values
+  keyword_init: true
+)
+
+
+# File: app/strategies/supertrend_continuation.rb
+# frozen_string_literal: true
+
+class Strategies::SupertrendContinuation < BaseStrategy
+  ADX_MIN = 18
+
+  def on_bar(bar:)
+    # compute and cache indicators for the latest bar snapshot
+    @cs1 = CandleSeries.for(instrument, '1m')
+    @cs5 = CandleSeries.for(instrument, '5m')
+    @cs15 = CandleSeries.for(instrument, '15m')
+
+    @st5  = @cs5.supertrend(len: 10, factor: 2.0)
+    @st15 = @cs15.supertrend(len: 10, factor: 2.0)
+    @adx5 = begin
+      @cs5.adx(14)
+    rescue StandardError
+      nil
+    end
+
+    @vwap5 = begin
+      vwap_for(@cs5)
+    rescue StandardError
+      nil
+    end
+    @close = bar[:close] || bar.close
+
+    @long_bias  = st_up?(@st5) && st_up?(@st15) && vwap_ok?(:long)
+    @short_bias = st_down?(@st5) && st_down?(@st15) && vwap_ok?(:short)
+  end
+
+  # ---------- ENTRY ----------
+  def entry_signal
+    return nil if recent_signal_cooldown?(seconds: 30) # avoid rapid refires
+    return nil unless (@adx5 || 0) >= ADX_MIN
+
+    if @long_bias
+      mark_signal!
+      return SignalStruct.new(
+        type: :entry, side: :buy_ce, reason: 'ST align + ADX + VWAP long',
+        confidence: conf_score(:long),
+        context: ctx
+      )
+    end
+
+    if @short_bias
+      mark_signal!
+      return SignalStruct.new(
+        type: :entry, side: :buy_pe, reason: 'ST align + ADX + VWAP short',
+        confidence: conf_score(:short),
+        context: ctx
+      )
+    end
+    nil
+  end
+
+  # ---------- EXIT ----------
+  # Basic exits for a runner already in market
+  def exit_signal(position_side:, entry_at:, ltp:)
+    # opposite ST flip (hard exit)
+    if position_side == :buy_ce && st_down?(@st5)
+      return SignalStruct.new(type: :exit, side: :close, reason: 'ST flip down', confidence: 1.0, context: ctx)
+    elsif position_side == :buy_pe && st_up?(@st5)
+      return SignalStruct.new(type: :exit, side: :close, reason: 'ST flip up', confidence: 1.0, context: ctx)
+    end
+
+    # VWAP loss + momentum fade (soft exit)
+    if position_side == :buy_ce && @vwap5 && @close < @vwap5 && (@adx5 || 0) < ADX_MIN
+      return SignalStruct.new(type: :exit, side: :close, reason: 'VWAP loss + weak ADX (CE)', confidence: 0.8, context: ctx)
+    elsif position_side == :buy_pe && @vwap5 && @close > @vwap5 && (@adx5 || 0) < ADX_MIN
+      return SignalStruct.new(type: :exit, side: :close, reason: 'VWAP loss + weak ADX (PE)', confidence: 0.8, context: ctx)
+    end
+
+    # Time stop (e.g., >8m with <0.5R progress) — compute R from settings if you track entry premium
+    if entry_at && (Time.now - entry_at) > 8 * 60
+      return SignalStruct.new(type: :exit, side: :close, reason: 'time stop 8m', confidence: 0.6, context: ctx)
+    end
+
+    nil
+  end
+
+  private
+
+  def vwap_for(cs)
+    return nil unless cs.respond_to?(:vwap)
+
+    cs.vwap
+  end
+
+  def st_up?(st)   = st && (st.respond_to?(:trend_up?)   ? st.trend_up?   : st[:trend] == :up)
+  def st_down?(st) = st && (st.respond_to?(:trend_down?) ? st.trend_down? : st[:trend] == :down)
+
+  def vwap_ok?(dir)
+    return true unless @vwap5 # if VWAP unavailable, don't block
+    return @close > @vwap5 if dir == :long
+    return @close < @vwap5 if dir == :short
+
+    true
+  end
+
+  def conf_score(dir)
+    base = 0.6
+    base += 0.2 if dir == :long && st_up?(@st15)
+    base += 0.2 if dir == :short && st_down?(@st15)
+    base += 0.1 if (@adx5 || 0) >= (ADX_MIN + 5)
+    base.clamp(0.0, 1.0)
+  end
+
+  def ctx
+    {
+      adx5: @adx5,
+      st5: (if @st5.respond_to?(:trend)
+              @st5.trend
+            else
+              (if @long_bias
+                 :up
+               else
+                 (@short_bias ? :down : :flat)
+               end)
+            end),
+      st15: (@st15.respond_to?(:trend) ? @st15.trend : nil),
+      vwap: @vwap5,
+      close: @close
+    }
   end
 end
 
@@ -2916,6 +5672,26 @@ namespace :instruments do
 
   desc 'Reimport (clear and import)'
   task reimport: %i[clear import]
+end
+
+
+# File: lib/tasks/trader.rake
+# lib/tasks/trader.rake
+namespace :trader do
+  desc 'Start strategy and positions loops'
+  task start: :environment do
+    instruments = Instrument.where(symbol: %w[NIFTY BANKNIFTY SENSEX]) # adjust
+    $strategy_loop  = Runner::StrategyLoop.new(instruments: instruments).start
+    $positions_loop = Runner::PositionsLoop.new.start
+    puts 'Loops started. Ctrl-C to stop (if foreground).'
+    sleep
+  end
+
+  desc 'Stop loops (flip kill-switch)'
+  task stop: :environment do
+    Setting.put('trading_enabled', 'false')
+    puts 'Kill-switch flipped off.'
+  end
 end
 
 
@@ -2997,6 +5773,5 @@ if ENV['ENABLE_WS'] == 'true'
     nil
   end
 end
-
 
 
