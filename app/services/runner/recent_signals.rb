@@ -1,7 +1,7 @@
 # app/services/runner/recent_signals.rb
 module Runner
   class RecentSignals
-    KEY = 'recent_signals'
+    KEY = 'recent_signals'.freeze
 
     # store a short-lived fingerprint per underlying (e.g., 30s)
     def self.seen?(underlying_id:, fingerprint:, ttl: 30)

@@ -75,6 +75,17 @@ class CandleSeries
   def highs  = candles.map(&:high)
   def lows   = candles.map(&:low)
 
+  def to_hash
+    {
+      'timestamp' => candles.map { |c| c.timestamp.to_i },
+      'open' => opens,
+      'high' => highs,
+      'low' => lows,
+      'close' => closes,
+      'volume' => candles.map(&:volume)
+    }
+  end
+
   def hlc
     candles.each_with_index.map do |c, _i|
       {

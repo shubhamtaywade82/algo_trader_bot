@@ -30,7 +30,6 @@ module Portfolio
       arr = DhanHQ::Models::Position.all
 
       Array(arr).each do |p|
-        pp p
         Position
           .find_or_initialize_by(exchange_segment: p.exchange_segment, security_id: p.security_id)
           .update!(

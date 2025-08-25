@@ -16,6 +16,7 @@ module Options
         side: @side,
         strategy_type: @config[:strategy_type]
       )
+
       return nil unless pick&.selected && pick.derivative
 
       # Re-fetch chain for the chosen expiry to extract bid/ask exactly like before

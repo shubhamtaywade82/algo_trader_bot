@@ -69,7 +69,7 @@ module Runner
         # one-shot fetch per symbol → process immediately
         @roster.each do |sym|
           if (inst = fetch_instrument(sym))
-            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 2)
+            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 5)
             if raw.present?
               series = CandleSeries.new(symbol: inst.symbol_name, interval: tf_for(@mode.tf))
               series.load_from_raw(raw)
@@ -249,7 +249,7 @@ module Runner
 
     def holy_or_supertrend(series)
       cfg = demo_mode? ? Indicators::HolyGrail.demo_config : {}
-      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series), config: cfg)
+      hg = Indicators::HolyGrail.call(candles: series.to_hash, config: cfg)
 
       notify_step(:demo_gate, "HolyGrail cfg=#{cfg.inspect}") if demo_mode?
       case hg&.bias

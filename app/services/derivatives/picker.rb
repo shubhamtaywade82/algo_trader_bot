@@ -54,7 +54,7 @@ module Derivatives
         historical_data: @instrument.intraday_ohlc(interval: '5', days: 3) || historical_data
       )
       res = analyzer.analyze(signal_type: @side, strategy_type: @strategy_type, signal_strength: @signal_strength)
-      return res unless res[:proceed] && res[:selected]
+      return nil unless res[:proceed] && res[:selected]
 
       drv = resolve_derivative(res[:selected], @expiry, @side)
       return nil unless drv
