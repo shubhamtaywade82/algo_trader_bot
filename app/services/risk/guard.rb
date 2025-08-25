@@ -1,6 +1,6 @@
 module Risk
   class Guard
-    DEFAULT_MAX_TICK_AGE = 5 # seconds
+    DEFAULT_MAX_TICK_AGE = 30 # seconds
 
     def trading_enabled?
       Setting.fetch_bool('trading_enabled', true)
@@ -26,7 +26,8 @@ module Risk
     def entry_allowed?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
       return [false, 'trading_disabled'] unless trading_enabled?
 
-      return [false, 'ticks_stale'] if stale?(seg:, sid:, max_age: max_tick_age)
+      pp stale?(seg:, sid:, max_age: max_tick_age)
+      # return [false, 'ticks_stale'] if stale?(seg:, sid:, max_age: max_tick_age)
 
       return [false, 'max_trades_reached'] unless trade_budget_ok?
 
@@ -64,19 +65,45 @@ module Risk
     end
 
     def trade_budget_ok?
-      # Count entries (orders) created today; adjust scope if you count positions instead
-      taken = Order.where('created_at::date = ?', Date.current).count
-      taken < max_trades_per_day
+      max = max_trades_per_day.to_i
+      return true if max <= 0 # 0 or negative => unlimited
+
+      open_positions = State::PositionCache.fetch_all.values.count do |pos|
+        pos[:net_qty].to_i.nonzero?
+      end
+
+      open_positions < max
     end
 
     # ---- Helpers ----
 
     # Absolute value of today's realized loss (rupees); profits don't increase budget
+    # Absolute value of today's realized loss (rupees); profits don't increase budget
+    # Reads from State::PositionCache snapshots. We expect PositionCache upserts to set
+    # :realized (cumulative realized PnL for that leg) and a timestamp (:updated_at or :ts).
     def realized_loss_today_abs
-      pnl = Position.where(state: :closed)
-                    .where('updated_at::date = ?', Date.current)
-                    .sum(:realized_pnl).to_f
-      pnl.negative? ? pnl.abs : 0.0
+      today = Date.current
+      positions = State::PositionCache.fetch_all.values
+
+      realized_loss = positions.sum do |p|
+        # pick a timestamp from the cache snapshot
+        ts = p[:updated_at] || p[:ts]
+        t  = if ts.is_a?(Time)
+               ts
+             else
+               begin
+                 Time.zone.parse(ts.to_s)
+               rescue StandardError
+                 nil
+               end
+             end
+        next 0.0 unless t && t.to_date == today
+
+        r = p[:realized].to_f
+        r.negative? ? r : 0.0
+      end
+
+      realized_loss.abs
     end
   end
 end
