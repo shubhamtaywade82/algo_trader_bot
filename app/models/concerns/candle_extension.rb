@@ -110,5 +110,9 @@ module CandleExtension
 
       TechnicalAnalysis::Obv.calculate(dcv)
     end
+
+    def candle_series(interval: '5')
+      candles(interval: interval)
+    end
   end
 end

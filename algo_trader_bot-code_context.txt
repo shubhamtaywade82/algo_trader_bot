@@ -245,8 +245,6 @@ class CandleSeries
     end
   end
 
-  private
-
   # Normalises a single candle entry which may be provided either as a Hash
   # with symbol/string keys or as an Array in the order:
   # [timestamp, open, high, low, close, volume].
@@ -540,6 +538,10 @@ module CandleExtension
       end
 
       TechnicalAnalysis::Obv.calculate(dcv)
+    end
+
+    def candle_series(interval: '5')
+      candles(interval: interval)
     end
   end
 end
@@ -2262,6 +2264,53 @@ class InstrumentsImporter
   end
 end
 
+# File: app/services/live/quote.rb
+# frozen_string_literal: true
+
+module Live
+  class Quote
+    # Returns { ltp:, bid:, ask:, ts: } using TickCache first; depth API fallback.
+    def self.get(exchange_segment, security_id)
+      # 1) WebSocket tick if we have it
+      tick = begin
+        Live::TickCache.get(exchange_segment, security_id)
+      rescue StandardError
+        nil
+      end
+      if tick
+        bid = (tick[:best_bid_price] || tick[:bid]).to_f
+        ask = (tick[:best_ask_price] || tick[:ask]).to_f
+        ltp = (tick[:ltp] || tick[:last_price]).to_f
+        return { ltp: ltp, bid: bid, ask: ask, ts: Time.zone.now } if ltp.positive?
+      end
+
+      # 2) REST quote fallback
+      depth = begin
+        DhanHQ::Models::MarketFeed.depth(exchange_segment: exchange_segment, security_id: security_id)
+      rescue StandardError
+        nil
+      end
+      if depth
+        best_bid = Array(depth[:bids]).first&.dig(:price).to_f
+        best_ask = Array(depth[:asks]).first&.dig(:price).to_f
+        ltp      = depth[:last_traded_price].to_f.nonzero? || depth[:ltp].to_f
+        return { ltp: ltp, bid: best_bid, ask: best_ask, ts: Time.zone.now }
+      end
+
+      # 3) as a last resort — plain LTP
+      ltp = begin
+        Dhanhq::API::Quote.ltp(security_id)
+      rescue StandardError
+        nil
+      end
+      return { ltp: ltp.to_f, bid: nil, ask: nil, ts: Time.zone.now } if ltp
+
+      nil
+    end
+  end
+end
+
+
 # File: app/services/live/tick_cache.rb
 # frozen_string_literal: true
 
@@ -3240,34 +3289,44 @@ end
 
 
 # File: app/services/orders/closer.rb
-# app/services/orders/closer.rb
+# frozen_string_literal: true
+
 module Orders
   class Closer < ApplicationService
-    def initialize(order:)
-      @order = order
+    # Accept either a cached order hash or a client_ref
+    def initialize(order: nil, client_ref: nil)
+      @order_hash = order || (client_ref && State::OrderCache.get(client_ref))
     end
 
     def call
-      return unless @order&.super_ref.present?
+      return unless @order_hash&.dig(:broker_order_id)
 
-      DhanHQ::SuperOrders.close(super_order_id: @order.super_ref)
-      @order.update!(super_status: :closed)
+      DhanHQ::Models::SuperOrder.new(order_id: @order_hash[:broker_order_id]).cancel('ENTRY_LEG')
+    rescue StandardError => e
+      Rails.logger.warn("[Orders::Closer] cancel failed: #{e.class} #{e.message}")
+      false
     end
   end
 end
 
-
 # File: app/services/orders/executor.rb
-# app/services/orders/executor.rb
+# frozen_string_literal: true
+
 module Orders
   class Executor < ApplicationService
+    # instrument: Instrument/Derivative
+    # side: "BUY"/"SELL"
+    # qty: lots/contracts
+    # entry_type: :market / :limit
+    # risk_params: { sl_value:, tp_value:, trail_sl_value:, trail_sl_jump: }
+    # client_ref: unique idempotency key
     def initialize(instrument:, side:, qty:, entry_type:, risk_params:, client_ref:, entry_price: nil)
-      @instrument = instrument
-      @side = side
-      @qty = qty
-      @entry_type = entry_type
-      @risk_params = risk_params
-      @client_ref = client_ref
+      @instrument  = instrument
+      @side        = side.to_s.upcase
+      @qty         = qty.to_i
+      @entry_type  = entry_type.to_sym
+      @risk_params = risk_params || {}
+      @client_ref  = client_ref
       @entry_price = entry_price
     end
 
@@ -3276,8 +3335,12 @@ module Orders
       raise 'Trading disabled' unless guard.trading_enabled?
 
       PgLocks.with_lock("super:#{@instrument.id}") do
-        return Order.find_by(client_ref: @client_ref) if Order.exists?(client_ref: @client_ref)
+        # 1) Idempotency via cache
+        if (existing = State::OrderCache.get(@client_ref))
+          return existing
+        end
 
+        # 2) Build payload
         params = Orders::SuperParamsBuilder.call(
           instrument: @instrument,
           side: @side,
@@ -3286,142 +3349,242 @@ module Orders
           entry_price: @entry_price,
           sl_value: @risk_params[:sl_value],
           tp_value: @risk_params[:tp_value],
-          trail_sl_value: @risk_params[:trail_sl_value],
-          trail_sl_jump: @risk_params[:trail_sl_jump],
+          trail_sl_jump: @risk_params[:trail_sl_value],
           client_ref: @client_ref
         )
 
-        # Your gem call — adjust to your method signature / return shape
-        # Expected resp fields: :super_order_id, :avg_price (if provided by broker immediately)
-        resp = DhanHQ::SuperOrders.place(params)
+        pp params
+        # 3) Place Super Order (returns model with order_id/order_status)
+        so = DhanHQ::Models::SuperOrder.create(params)
+        raise 'SuperOrder.create failed' unless so&.order_id
 
-        Order.create!(
-          instrument_id: @instrument.id,
+        # 4) Cache order snapshot
+        order_hash = {
+          client_ref: @client_ref,
+          broker_order_id: so.order_id,
+          status: so.order_status || 'PENDING',
           side: @side,
           qty: @qty,
-          entry_type: Order.entry_types[@entry_type.to_s],
-          client_ref: @client_ref,
-          super_ref: resp[:super_order_id],
-          super_status: :submitted,
-          sl_value: params[:sl_value],
-          tp_value: params[:tp_value],
-          trail_sl_value: params[:trail_sl_value],
-          entry_price: resp[:avg_price]
-        )
+          entry_type: @entry_type,
+          entry_price: params[:price], # avg price may not be immediate
+          stop_loss_price: params[:stop_loss_price],
+          target_price: params[:target_price],
+          trailing_value: params[:trailing_value],
+          trailing_jump: params[:trailing_jump],
+          exchange_segment: @instrument.exchange_segment,
+          security_id: @instrument.security_id,
+          pos_key: State::PositionCache.key(seg: @instrument.exchange_segment,
+                                            sid: @instrument.security_id,
+                                            prod: 'INTRADAY'),
+          ts: Time.zone.now
+        }.compact
+        State::OrderCache.put!(@client_ref, order_hash)
+
+        # 5) Bump PositionCache (optimistic)
+        bump_position_cache!(order_hash)
+
+        order_hash
       end
+    end
+
+    private
+
+    def bump_position_cache!(o)
+      seg = o[:exchange_segment]
+      sid = o[:security_id]
+      prod = 'INTRADAY'
+      cur = State::PositionCache.get(seg:, sid:, prod:) || {}
+      net = cur[:net_qty].to_i + (@side == 'BUY' ? @qty : -@qty)
+
+      State::PositionCache.upsert!(
+        seg:, sid:, prod:,
+        attrs: cur.merge(
+          seg: seg, sid: sid, prod: prod,
+          net_qty: net,
+          buy_avg: cur[:buy_avg], # leave to broker reconcile
+          sell_avg: cur[:sell_avg],
+          updated_by: 'Orders::Executor'
+        )
+      )
     end
   end
 end
 
-
 # File: app/services/orders/manager.rb
+# app/services/orders/manager.rb
+# frozen_string_literal: true
+
 module Orders
   class Manager < ApplicationService
+    # Try to flatten using SuperOrder; fallback to plain MARKET opposite leg
     def self.exit_position!(security_id:, segment:, reason:)
-      # Try to close Super Order first (if we have it)
-      if (ord = Order.find_by(super_status: %i[submitted modified],
-                              instrument_id: Derivative.find_by(security_id: security_id)&.instrument_id))
-        Orders::Closer.call(order: ord)
-      else
-        # Market close fallback – use Dhan plain order
+      # 1) If we have a cached super order for this instrument, cancel it.
+      order = State::OrderCache.fetch_all.values.find do |o|
+        o[:security_id].to_i == security_id.to_i && o[:exchange_segment].to_s == segment.to_s
+      end
+
+      if order&.dig(:broker_order_id)
         begin
-          DhanHQ::Models::Order.create!(
-          transaction_type: 'SELL',
+          ok = DhanHQ::Models::SuperOrder.new(order_id: order[:broker_order_id]).cancel('ENTRY_LEG')
+          Rails.logger.info("[Orders::Manager] cancel super #{segment}:#{security_id} => #{ok} (#{reason})")
+          return true if ok
+        rescue StandardError => e
+          Rails.logger.warn("[Orders::Manager] super cancel failed: #{e.class} #{e.message}")
+        end
+      end
+
+      # 2) Fallback: plain opposite market order
+      begin
+        side = (infer_side_from_pos(segment:, security_id:) == 'LONG' ? 'SELL' : 'BUY')
+        lot  = Derivative.find_by(security_id: security_id)&.lot_size || 1
+
+        DhanHQ::Models::Order.create!(
+          transaction_type: side,
           exchange_segment: segment,
           product_type: 'INTRADAY',
           order_type: 'MARKET',
           validity: 'DAY',
           security_id: security_id,
-          quantity: Derivative.find_by(security_id: security_id)&.lot_size || 1
+          quantity: lot
         )
-        rescue StandardError
-          nil
-        end
+        Rails.logger.info("[Orders::Manager] market flatten #{segment}:#{security_id} (#{reason})")
+        true
+      rescue StandardError => e
+        Rails.logger.error("[Orders::Manager] fallback exit failed #{segment}:#{security_id} – #{e.class}: #{e.message}")
+        false
       end
-      Rails.logger.info("[Orders::Manager] exit #{segment}:#{security_id} (#{reason})")
+    end
+
+    def self.infer_side_from_pos(segment:, security_id:)
+      pos = State::PositionCache.get(seg: segment, sid: security_id, prod: 'INTRADAY') || {}
+      qty = pos[:net_qty].to_i
+      qty >= 0 ? 'LONG' : 'SHORT'
     end
   end
 end
 
-
 # File: app/services/orders/super_modifier.rb
-# app/services/orders/super_modifier.rb
+# frozen_string_literal: true
+
 module Orders
   class SuperModifier < ApplicationService
-    # Any of the new_* values may be nil; only send the ones you want to change.
-    def initialize(order:, new_sl_value: nil, new_tp_value: nil, new_trail_sl_value: nil)
-      @order = order
-      @new_sl = new_sl_value && PriceMath.round_tick(new_sl_value)
-      @new_tp = new_tp_value && PriceMath.round_tick(new_tp_value)
-      @new_trail = new_trail_sl_value && PriceMath.round_tick(new_trail_sl_value)
+    # Accept either a cached order hash or a client_ref
+    def initialize(order: nil, client_ref: nil, new_sl_value: nil, new_tp_value: nil, new_trail_sl_value: nil)
+      @order_hash = order || (client_ref && State::OrderCache.get(client_ref))
+      @client_ref = client_ref || @order_hash&.dig(:client_ref)
+      @new_sl     = new_sl_value && PriceMath.round_tick(new_sl_value)
+      @new_tp     = new_tp_value && PriceMath.round_tick(new_tp_value)
+      @new_trail  = new_trail_sl_value && PriceMath.round_tick(new_trail_sl_value)
     end
 
     def call
-      return if @order&.super_ref.blank?
+      return unless @order_hash && @order_hash[:broker_order_id]
 
       payload = {}
 
-      # Tighten-only policy (for long calls/puts):
-      # - SL is distance/level semantics vary across brokers; safest: only increase SL price if your convention = absolute price.
-      #   If you store SL as absolute premium level: tightening means moving SL *upwards* (closer to current) for long positions.
-      payload[:sl_value] = @new_sl if @new_sl && @order.sl_value && @new_sl >= @order.sl_value
+      cur_sl    = @order_hash[:stop_loss_price]&.to_f
+      cur_tp    = @order_hash[:target_price]&.to_f
+      cur_trail = @order_hash[:trailing_value]&.to_f
 
-      # - TP can only be decreased (closer target), never widened outward.
-      payload[:tp_value] = @new_tp if @new_tp && @order.tp_value && @new_tp <= @order.tp_value
-
-      # - Trailing SL value can only be raised (tighter).
-      payload[:trail_sl_value] = @new_trail if @new_trail && (@order.trail_sl_value.nil? || @new_trail >= @order.trail_sl_value)
+      payload[:stop_loss_price] = @new_sl   if @new_sl   && cur_sl   && @new_sl >= cur_sl   # tighten only
+      payload[:target_price]    = @new_tp   if @new_tp   && cur_tp   && @new_tp <= cur_tp   # nearer only
+      payload[:trailing_value]  = @new_trail if @new_trail && (cur_trail.nil? || @new_trail >= cur_trail)
 
       return if payload.empty?
 
-      resp = DhanHQ::SuperOrders.modify(
-        super_order_id: @order.super_ref,
-        **payload
-      )
+      ok = DhanHQ::Models::SuperOrder.new(order_id: @order_hash[:broker_order_id]).modify(payload)
 
-      # Update only on accept
-      @order.update!(
-        sl_value: payload[:sl_value] || @order.sl_value,
-        tp_value: payload[:tp_value] || @order.tp_value,
-        trail_sl_value: payload[:trail_sl_value] || @order.trail_sl_value,
-        super_status: :modified
-      )
-      resp
+      if ok
+        # refresh cache
+        merged = @order_hash.merge(
+          stop_loss_price: payload[:stop_loss_price] || cur_sl,
+          target_price: payload[:target_price] || cur_tp,
+          trailing_value: payload[:trailing_value] || cur_trail,
+          status: 'MODIFIED',
+          ts: Time.zone.now
+        )
+        State::OrderCache.put!(@client_ref, merged)
+      end
+      ok
     end
   end
 end
 
-
 # File: app/services/orders/super_params_builder.rb
-# app/services/orders/super_params_builder.rb
+# frozen_string_literal: true
+
 module Orders
   class SuperParamsBuilder
-    # side: :buy or :sell
-    # entry_type: :market or :limit
-    def self.call(instrument:, side:, qty:, entry_type:, sl_value:, tp_value:, client_ref:, entry_price: nil, trail_sl_value: nil,
-                  trail_sl_jump: nil)
-      raise ArgumentError, 'qty must be positive' if qty.to_i <= 0
+    # Build request body for POST /v2/super/orders
+    #
+    # Arguments:
+    #   instrument:    Instrument/Derivative with #security_id and #exchange_segment
+    #   side:          :buy / :sell (or "BUY"/"SELL")
+    #   qty:           Integer quantity (lots/shares as per instrument)
+    #   entry_type:    :market / :limit
+    #   sl_value:      Absolute stop-loss price (premium/price), required
+    #   tp_value:      Absolute target price, required
+    #   client_ref:    Your idempotency key -> mapped to correlationId
+    #
+    # Optional:
+    #   entry_price:     Limit price (required when entry_type == :limit)
+    #   trail_sl_jump:   Trailing jump (absolute price jump)
+    #   product_type:    'INTRADAY' | 'CNC' | 'MARGIN' | 'MTF' (default: 'INTRADAY')
+    #   validity:        'DAY' (default)
+    #   dhan_client_id:  If your gem/config doesn’t inject it, pass here
+    #
+    # Returns: Hash with Dhan-compliant keys/casing
+    def self.call(
+      instrument:,
+      side:,
+      qty:,
+      entry_type:,
+      sl_value:,
+      tp_value:,
+      client_ref:,
+      entry_price: nil,
+      trail_sl_jump: nil,
+      product_type: 'INTRADAY',
+      validity: 'DAY',
+      dhan_client_id: nil
+    )
+      # ------------ validations ------------
+      raise ArgumentError, 'qty must be positive'            if qty.to_i <= 0
+      raise ArgumentError, 'sl_value must be present'        if sl_value.nil?
+      raise ArgumentError, 'tp_value must be present'        if tp_value.nil?
 
-      price = (entry_type.to_sym == :limit ? PriceMath.round_tick(entry_price) : nil)
-      raise ArgumentError, 'limit order requires a valid entry_price' if entry_type.to_sym == :limit && (price.nil? || price <= 0)
+      ord_type = entry_type.to_s.upcase # "MARKET" | "LIMIT"
+      price    = if ord_type == 'LIMIT'
+                   PriceMath.round_tick(entry_price).tap do |p|
+                     raise ArgumentError, 'limit order requires valid entry_price' if p.nil? || p <= 0
+                   end
+                 end
 
+      txn_side = side.to_s.upcase # "BUY" | "SELL"
+
+      # ------------ build payload ------------
       {
-        security_id: instrument.security_id,
-        exchange_segment: instrument.exchange_segment, # e.g., "NSE_FNO"
-        side: side.to_sym, # :buy / :sell
+        # identifiers / routing
+        # correlation_id: client_ref.to_s, # for tracking/idempotency
+        transaction_type: txn_side,                           # BUY / SELL
+        exchange_segment: instrument.exchange_segment,        # e.g. "NSE_FNO"
+        product_type: product_type.to_s.upcase, # INTRADAY / CNC / MARGIN / MTF
+        order_type: ord_type, # LIMIT / MARKET
+        validity: validity.to_s.upcase, # DAY (required by some setups)
+
+        # instrument + qty
+        security_id: instrument.security_id.to_s,
         quantity: qty.to_i,
-        order_type: entry_type.to_sym, # :market / :limit
-        price: price, # nil for market
-        sl_value: PriceMath.round_tick(sl_value),
-        tp_value: PriceMath.round_tick(tp_value),
-        trail_sl_value: trail_sl_value && PriceMath.round_tick(trail_sl_value),
-        trail_sl_jump: trail_sl_jump && PriceMath.round_tick(trail_sl_jump),
-        client_ref: client_ref
+
+        # price legs
+        price: price, # only for LIMIT (omitted for MARKET)
+        target_price: PriceMath.round_tick(tp_value),
+        stop_loss_price: PriceMath.round_tick(sl_value),
+        trailing_jump: trail_sl_jump && PriceMath.round_tick(trail_sl_jump)
       }.compact
     end
   end
 end
-
 
 # File: app/services/pg_locks.rb
 module PgLocks
@@ -3927,6 +4090,7 @@ module Runner
 
     def holy_or_supertrend(series)
       hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series))
+      pp hq
       case hg&.bias
       when :bullish then :up
       when :bearish then :down

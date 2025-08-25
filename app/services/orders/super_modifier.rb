@@ -1,45 +1,45 @@
-# app/services/orders/super_modifier.rb
+# frozen_string_literal: true
+
 module Orders
   class SuperModifier < ApplicationService
-    # Any of the new_* values may be nil; only send the ones you want to change.
-    def initialize(order:, new_sl_value: nil, new_tp_value: nil, new_trail_sl_value: nil)
-      @order = order
-      @new_sl = new_sl_value && PriceMath.round_tick(new_sl_value)
-      @new_tp = new_tp_value && PriceMath.round_tick(new_tp_value)
-      @new_trail = new_trail_sl_value && PriceMath.round_tick(new_trail_sl_value)
+    # Accept either a cached order hash or a client_ref
+    def initialize(order: nil, client_ref: nil, new_sl_value: nil, new_tp_value: nil, new_trail_sl_value: nil)
+      @order_hash = order || (client_ref && State::OrderCache.get(client_ref))
+      @client_ref = client_ref || @order_hash&.dig(:client_ref)
+      @new_sl     = new_sl_value && PriceMath.round_tick(new_sl_value)
+      @new_tp     = new_tp_value && PriceMath.round_tick(new_tp_value)
+      @new_trail  = new_trail_sl_value && PriceMath.round_tick(new_trail_sl_value)
     end
 
     def call
-      return if @order&.super_ref.blank?
+      return unless @order_hash && @order_hash[:broker_order_id]
 
       payload = {}
 
-      # Tighten-only policy (for long calls/puts):
-      # - SL is distance/level semantics vary across brokers; safest: only increase SL price if your convention = absolute price.
-      #   If you store SL as absolute premium level: tightening means moving SL *upwards* (closer to current) for long positions.
-      payload[:sl_value] = @new_sl if @new_sl && @order.sl_value && @new_sl >= @order.sl_value
+      cur_sl    = @order_hash[:stop_loss_price]&.to_f
+      cur_tp    = @order_hash[:target_price]&.to_f
+      cur_trail = @order_hash[:trailing_value]&.to_f
 
-      # - TP can only be decreased (closer target), never widened outward.
-      payload[:tp_value] = @new_tp if @new_tp && @order.tp_value && @new_tp <= @order.tp_value
-
-      # - Trailing SL value can only be raised (tighter).
-      payload[:trail_sl_value] = @new_trail if @new_trail && (@order.trail_sl_value.nil? || @new_trail >= @order.trail_sl_value)
+      payload[:stop_loss_price] = @new_sl   if @new_sl   && cur_sl   && @new_sl >= cur_sl   # tighten only
+      payload[:target_price]    = @new_tp   if @new_tp   && cur_tp   && @new_tp <= cur_tp   # nearer only
+      payload[:trailing_value]  = @new_trail if @new_trail && (cur_trail.nil? || @new_trail >= cur_trail)
 
       return if payload.empty?
 
-      resp = DhanHQ::SuperOrders.modify(
-        super_order_id: @order.super_ref,
-        **payload
-      )
+      ok = DhanHQ::Models::SuperOrder.new(order_id: @order_hash[:broker_order_id]).modify(payload)
 
-      # Update only on accept
-      @order.update!(
-        sl_value: payload[:sl_value] || @order.sl_value,
-        tp_value: payload[:tp_value] || @order.tp_value,
-        trail_sl_value: payload[:trail_sl_value] || @order.trail_sl_value,
-        super_status: :modified
-      )
-      resp
+      if ok
+        # refresh cache
+        merged = @order_hash.merge(
+          stop_loss_price: payload[:stop_loss_price] || cur_sl,
+          target_price: payload[:target_price] || cur_tp,
+          trailing_value: payload[:trailing_value] || cur_trail,
+          status: 'MODIFIED',
+          ts: Time.zone.now
+        )
+        State::OrderCache.put!(@client_ref, merged)
+      end
+      ok
     end
   end
 end

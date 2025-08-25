@@ -43,8 +43,6 @@ class CandleSeries
     end
   end
 
-  private
-
   # Normalises a single candle entry which may be provided either as a Hash
   # with symbol/string keys or as an Array in the order:
   # [timestamp, open, high, low, close, volume].
