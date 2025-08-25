@@ -5,7 +5,7 @@ module Option
     IV_RANK_MIN        = 0.00
     IV_RANK_MAX        = 0.80
     THETA_AVOID_HOUR   = 14.5 # 2:30 PM
-    TOP_RANKED_LIMIT   = 10
+    TOP_RANKED_LIMIT   = 5
     MIN_ADX            = 20
 
     attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta, :cfg

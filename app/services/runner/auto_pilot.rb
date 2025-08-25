@@ -82,7 +82,6 @@ module Runner
           end
         end
       else
-        # original looping fetch
         Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
           process_symbol(sym, series)
         end
@@ -152,7 +151,8 @@ module Runner
       end
       notify_step(:risk_guard, "ok (₹#{expected_risk.round(2)})")
 
-      place_super(inst, side, qty, sl: sl, tp: tp, trail: trail)
+      pp leg
+      place_super(leg, side, qty, sl: sl, tp: tp, trail: trail)
       @last_entry_at[sym] = Time.current unless @demo
       notify_step(:placed, @demo ? "DEMO: would place BUY #{side.upcase}" : 'order placed')
     rescue StandardError => e
@@ -190,7 +190,8 @@ module Runner
     end
 
     def place_super(inst, side, qty, sl:, tp:, trail:)
-      client_ref = "AP-#{inst.security_id}-#{side}-#{Time.now.to_i}"
+      client_ref = "AP-#{inst[:security_id]}-#{side}-#{Time.now.to_i}"
+
       params = Orders::SuperParamsBuilder.call(
         instrument: inst,
         side: :buy,
@@ -198,7 +199,6 @@ module Runner
         entry_type: :market,
         sl_value: sl,
         tp_value: tp,
-        trail_sl_value: (trail.positive? ? trail : nil),
         trail_sl_jump: (trail.positive? ? trail : nil),
         client_ref: client_ref
       )

@@ -32,8 +32,7 @@ module Orders
       entry_price: nil,
       trail_sl_jump: nil,
       product_type: 'INTRADAY',
-      validity: 'DAY',
-      dhan_client_id: nil
+      validity: 'DAY'
     )
       # ------------ validations ------------
       raise ArgumentError, 'qty must be positive'            if qty.to_i <= 0
@@ -52,15 +51,15 @@ module Orders
       # ------------ build payload ------------
       {
         # identifiers / routing
-        # correlation_id: client_ref.to_s, # for tracking/idempotency
-        transaction_type: txn_side,                           # BUY / SELL
-        exchange_segment: instrument.exchange_segment,        # e.g. "NSE_FNO"
+        correlation_id: client_ref.to_s, # for tracking/idempotency
+        transaction_type: txn_side, # BUY / SELL
+        exchange_segment: instrument[:exchange_segment], # e.g. "NSE_FNO"
         product_type: product_type.to_s.upcase, # INTRADAY / CNC / MARGIN / MTF
         order_type: ord_type, # LIMIT / MARKET
         validity: validity.to_s.upcase, # DAY (required by some setups)
 
         # instrument + qty
-        security_id: instrument.security_id.to_s,
+        security_id: instrument[:security_id].to_s,
         quantity: qty.to_i,
 
         # price legs
