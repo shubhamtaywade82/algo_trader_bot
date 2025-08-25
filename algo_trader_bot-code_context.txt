@@ -1699,6 +1699,7 @@ module Indicators
     RTA = RubyTechnicalAnalysis
     TA  = TechnicalAnalysis
 
+    # Keep the default lens as constants (unchanged)
     EMA_FAST  = 34
     EMA_SLOW  = 100
     RSI_LEN   = 14
@@ -1708,10 +1709,37 @@ module Indicators
     MACD_S = 26
     MACD_SIG = 9
 
-    # ------------------------------------------------------------------
-    # Result struct keeps the four “gate” keys first,
-    # then the raw indicators you already logged elsewhere.
-    # ------------------------------------------------------------------
+    # New: default gates (used unless overridden via config:)
+    DEFAULTS = {
+      ema_fast: EMA_FAST,
+      ema_slow: EMA_SLOW,
+      rsi_len: RSI_LEN,
+      adx_len: ADX_LEN,
+      atr_len: ATR_LEN,
+      macd_f: MACD_F,
+      macd_s: MACD_S,
+      macd_sig: MACD_SIG,
+
+      # “proceed?” gates
+      adx_gate: 20.0, # >= this to allow entries
+      rsi_up_min: 40.0, # bullish momentum must be above
+      rsi_down_max: 60.0, # bearish momentum must be below
+
+      # sanity for history length (keep ≥ slow MA by default)
+      min_candles: EMA_SLOW
+    }.freeze
+
+    # Handful of presets you can reuse from callers:
+    def self.demo_config
+      {
+        # keep math stable but relax gates to near-zero so demo always “flows”
+        adx_gate: 0.0,
+        rsi_up_min: 0.0,
+        rsi_down_max: 100.0,
+        min_candles: 10 # allow tiny series in demo
+      }
+    end
+
     Result = Struct.new(
       :bias, :adx, :momentum, :proceed?,
       :sma50, :ema200, :rsi14, :atr14, :macd, :trend,
@@ -1721,20 +1749,32 @@ module Indicators
     end
 
     # ------- ctor -----------------------------------------------------
-    def initialize(candles:)
+    def initialize(candles:, config: {})
       @candles = candles # Dhan hash-of-arrays
-      raise ArgumentError, "need ≥ #{EMA_SLOW} candles" if closes.size < EMA_SLOW
+
+      @cfg = DEFAULTS.merge((config || {}).transform_keys(&:to_sym))
+
+      min_needed = @cfg[:min_candles].to_i.positive? ? @cfg[:min_candles].to_i : DEFAULTS[:min_candles]
+      raise ArgumentError, "need ≥ #{min_needed} candles" if closes.size < min_needed
     end
 
     # ------- main -----------------------------------------------------
     def call
-      sma50  = sma(EMA_FAST)
-      ema200 = ema(EMA_SLOW)
-      rsi14  = rsi(RSI_LEN)
-      macd_h = macd_hash
-      adx14  = adx(ADX_LEN)
-      atr14  = atr(ATR_LEN)
+      # read lengths from cfg (still default to the original)
+      ema_fast = @cfg[:ema_fast]
+      ema_slow = @cfg[:ema_slow]
+      rsi_len  = @cfg[:rsi_len]
+      adx_len  = @cfg[:adx_len]
+      atr_len  = @cfg[:atr_len]
 
+      sma50  = sma(ema_fast)
+      ema200 = ema(ema_slow)
+      rsi14  = rsi(rsi_len)
+      macd_h = macd_hash
+      adx14  = adx(adx_len)
+      atr14  = atr(atr_len)
+
+      # bias on MA alignment
       bias =
         if    sma50 > ema200 then :bullish
         elsif sma50 < ema200 then :bearish
@@ -1742,32 +1782,40 @@ module Indicators
           :neutral
         end
 
+      # momentum on MACD+RSI, but use cfg bands now
+      rsi_up_min   = @cfg[:rsi_up_min].to_f
+      rsi_down_max = @cfg[:rsi_down_max].to_f
+
       momentum =
-        if macd_h[:macd] > macd_h[:signal] && rsi14 > 50
+        if macd_h[:macd] > macd_h[:signal] && rsi14 >= rsi_up_min
           :up
-        elsif macd_h[:macd] < macd_h[:signal] && rsi14 < 50
+        elsif macd_h[:macd] < macd_h[:signal] && rsi14 <= rsi_down_max
           :down
         else
           :flat
         end
 
+      # proceed gate with configurable ADX
+      adx_gate = @cfg[:adx_gate].to_f
+
       proceed =
         case bias
         when :bullish
-          passed = adx14 >= 20.0 && momentum == :up
-          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: bullish): adx=#{adx14}, momentum=#{momentum}" } unless passed
+          passed = adx14 >= adx_gate && momentum == :up
+          Rails.logger.debug { "[HolyGrail] Not proceeding (bullish): adx=#{adx14} gate=#{adx_gate}, momentum=#{momentum}" } unless passed
           passed
         when :bearish
-          passed = adx14 >= 20.0 && momentum == :down
-          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: bearish): adx=#{adx14}, momentum=#{momentum}" } unless passed
+          passed = adx14 >= adx_gate && momentum == :down
+          Rails.logger.debug { "[HolyGrail] Not proceeding (bearish): adx=#{adx14} gate=#{adx_gate}, momentum=#{momentum}" } unless passed
           passed
         else
-          Rails.logger.debug { "[HolyGrail] Not proceeding (bias: #{bias}): neutral bias, adx=#{adx14}, momentum=#{momentum}" }
+          Rails.logger.debug { "[HolyGrail] Not proceeding (#{bias}): neutral bias, adx=#{adx14}, momentum=#{momentum}, gate=#{adx_gate}" }
           false
         end
 
       latest_time = Time.zone.at(stamps.last)
-      Rails.logger.debug { "[HolyGrail] (#{latest_time}) Not proceeding ..." }
+      Rails.logger.debug { "[HolyGrail] (#{latest_time}) proceed?=#{proceed}" }
+
       trend =
         if ema200 < closes.last && sma50 > ema200 then :up
         elsif ema200 > closes.last && sma50 < ema200 then :down
@@ -1781,7 +1829,6 @@ module Indicators
       )
     end
 
-    # ------- helpers --------------------------------------------------
     private
 
     def closes = @candles['close'].map(&:to_f)
@@ -1789,11 +1836,10 @@ module Indicators
     def lows   = @candles['low'].map(&:to_f)
     def stamps = @candles['timestamp'] || []
 
-    # ---------- rows with :date_time required by technical_analysis ---
     def ohlc_rows
       @ohlc_rows ||= highs.each_index.map do |i|
         {
-          date_time: Time.zone.at(stamps[i] || 0), # <- NEW
+          date_time: Time.zone.at(stamps[i] || 0),
           high: highs[i],
           low: lows[i],
           close: closes[i]
@@ -1808,9 +1854,9 @@ module Indicators
 
     def macd_hash
       m, s, h = RTA::Macd.new(series: closes,
-                              fast_period: MACD_F,
-                              slow_period: MACD_S,
-                              signal_period: MACD_SIG).call
+                              fast_period: @cfg[:macd_f],
+                              slow_period: @cfg[:macd_s],
+                              signal_period: @cfg[:macd_sig]).call
       { macd: m, signal: s, hist: h }
     end
 
@@ -1820,8 +1866,7 @@ module Indicators
     end
 
     def adx(len)
-      ad = TA::Adx.calculate(ohlc_rows.last(len * 2), period: len)
-      ad.first.adx
+      TA::Adx.calculate(ohlc_rows.last(len * 2), period: len).first.adx
     end
   end
 end
@@ -3925,10 +3970,18 @@ module Runner
     SCALP = MODE.new(
       name: :scalp, tf: '3', adx_min: 16, profit_arm_pct: 0.01, time_stop_s: 240, scalp: true
     )
+    DEMO = MODE.new(
+      name: :demo, tf: '1', adx_min: 0, profit_arm_pct: 0.0, time_stop_s: 0, scalp: false
+    )
 
-    def initialize(symbols:, mode: :normal, roster: nil)
-      @symbols = Array(symbols).presence || %w[NIFTY BANKNIFTY]
-      @mode    = (mode.to_s == 'scalp' ? SCALP : NORMAL)
+    def initialize(symbols: [], mode: :normal, roster: nil, demo: false)
+      @symbols = Array(symbols).presence || %w[NIFTY BANKNIFTY SENSEX]
+      @mode    = case mode.to_s
+                 when 'scalp' then SCALP
+                 when 'demo'  then DEMO
+                 else NORMAL
+                 end
+      @demo = demo || (mode.to_s == 'demo')
       @roster  = roster || @symbols
       @running = Concurrent::AtomicBoolean.new(false)
       @last_entry_at = {}
@@ -3964,46 +4017,105 @@ module Runner
 
         now = Time.zone.now
         run_once if inside_session?(now)
-        sleep 10 # light cadence; bars fetch is heavier below
+        sleep(@demo ? 15 : 30) # light cadence; bars fetch is heavier below
       end
     end
 
     def run_once
-      # Pull series for each symbol on the configured TF
-      Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
-        process_symbol(sym, series)
+      if @demo
+        # one-shot fetch per symbol → process immediately
+        @roster.each do |sym|
+          if (inst = fetch_instrument(sym))
+            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 2)
+            if raw.present?
+              series = CandleSeries.new(symbol: inst.symbol_name, interval: tf_for(@mode.tf))
+              series.load_from_raw(raw)
+              process_symbol(sym, series)
+            else
+              notify_step(:fetch, "no OHLC for #{sym}")
+            end
+          else
+            notify_step(:fetch, "instrument not found for #{sym}")
+          end
+        end
+      else
+        # original looping fetch
+        Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
+          process_symbol(sym, series)
+        end
+        sleep 12
+        Bars::FetchLoop.stop
       end
-      sleep 12 # let one fetch cycle finish; guard against tight loops
-      Bars::FetchLoop.stop
     end
 
     def process_symbol(sym, series)
-      return if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
+      notify_step(:gate_start, "→ #{sym} (#{@mode.name}/tf=#{@mode.tf})")
+
+      if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
+        notify_step(:gate_chop, "skip: choppy/adx<#{@mode.adx_min}")
+        return
+      else
+        notify_step(:gate_chop, "ok (adx>=#{@mode.adx_min})")
+      end
 
       trend = holy_or_supertrend(series)
-      return if %i[side neutral].include?(trend)
+      if %i[side neutral].include?(trend)
+        notify_step(:gate_trend, 'skip: neutral/side')
+        return
+      else
+        notify_step(:gate_trend, "ok: #{trend.upcase}")
+      end
 
       inst = fetch_instrument(sym)
-      return unless inst
+      pp inst
+      unless inst
+        notify_step(:instrument, "skip: not found #{sym}")
+        return
+      end
 
       side = (trend == :up ? :ce : :pe)
-      leg  = Options::ChainAnalyzer.call(underlying: inst, side: side, config: { strategy_type: (@mode.scalp ? 'intraday' : 'intraday') })
-      return unless leg && leg[:ltp].to_f.positive?
+      notify_step(:picker, "choose side=#{side}")
 
-      # Budget/guard: 30% capital per trade; expect ~1R equal to 10% of premium baseline
+      leg = Options::ChainAnalyzer.call(
+        underlying: inst, side: side,
+        config: { strategy_type: (@mode.scalp ? 'intraday' : 'market') }
+      )
+      pp leg
+      unless leg && leg[:ltp].to_f.positive?
+        notify_step(:picker, 'skip: no leg/ltp<=0')
+        return
+      end
+      notify_step(:picker, "picked strike=#{leg[:strike]} ltp=#{leg[:ltp]} lot=#{leg[:lot_size]}")
+
       qty = leg[:lot_size].to_i
-      return if qty <= 0
+      if qty <= 0
+        notify_step(:qty, 'skip: qty<=0')
+        return
+      end
+      notify_step(:qty, "qty=#{qty}")
 
-      # Skip repeated entries too fast
-      return if entered_recently?(sym)
+      if entered_recently?(sym)
+        notify_step(:cooldown, 'skip: recent entry cool‑down')
+        return
+      end
+      notify_step(:cooldown, 'ok')
 
       sl, tp, trail = rr_for(inst, leg, series)
-      return unless risk_ok?(inst, expected_risk_rupees: qty * leg[:ltp] * 0.10) # ~10% of premium
+      notify_step(:risk_levels, "SL=#{sl} TP=#{tp} TRL=#{trail}")
+
+      expected_risk = qty * leg[:ltp] * 0.10
+      unless risk_ok?(inst, expected_risk_rupees: expected_risk)
+        notify_step(:risk_guard, "skip: risk not ok (₹#{expected_risk.round(2)})")
+        return
+      end
+      notify_step(:risk_guard, "ok (₹#{expected_risk.round(2)})")
 
       place_super(inst, side, qty, sl: sl, tp: tp, trail: trail)
-      @last_entry_at[sym] = Time.current
+      @last_entry_at[sym] = Time.current unless @demo
+      notify_step(:placed, @demo ? "DEMO: would place BUY #{side.upcase}" : 'order placed')
     rescue StandardError => e
       Rails.logger.warn("[AutoPilot] #{sym} #{e.class}: #{e.message}")
+      notify_failure(e, :process_symbol)
     end
 
     def rr_for(inst, leg, series)
@@ -4049,22 +4161,23 @@ module Runner
         client_ref: client_ref
       )
       Rails.logger.info("[AutoPilot] Super params → #{params}")
-      # Place or dry-run
-      if Setting.fetch_bool('PLACE_ORDER', false)
+      notify_step(:super_params, params.inspect)
+
+      # DEMO forces dry-run; otherwise keep existing PLACE_ORDER flag
+      if @demo || !Setting.fetch_bool('PLACE_ORDER', false)
+        notify("💡 DRYRUN SUPER PARAMS\n#{params.inspect}", tag: 'DRYRUN')
+      else
         order = Orders::Executor.call(
           instrument: inst, side: :buy, qty: qty, entry_type: :market,
           risk_params: { sl_value: sl, tp_value: tp, trail_sl_value: trail, trail_sl_jump: trail },
           client_ref: client_ref
         )
-        # subscribe the derivative as well
         begin
           Live::WsHub.instance.subscribe(seg: order.instrument.exchange_segment, sid: order.instrument.security_id.to_s)
         rescue StandardError
           nil
         end
         register_for_management(order, inst.symbol_name, side: side)
-      else
-        notify("💡 DRYRUN SUPER PARAMS\n#{params.inspect}", tag: 'DRYRUN')
       end
     end
 
@@ -4088,9 +4201,15 @@ module Runner
       end
     end
 
+    def demo_mode?
+      @demo
+    end
+
     def holy_or_supertrend(series)
-      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series))
-      pp hq
+      cfg = demo_mode? ? Indicators::HolyGrail.demo_config : {}
+      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series), config: cfg)
+
+      notify_step(:demo_gate, "HolyGrail cfg=#{cfg.inspect}") if demo_mode?
       case hg&.bias
       when :bullish then :up
       when :bearish then :down
@@ -4125,18 +4244,30 @@ module Runner
     end
 
     def entered_recently?(sym)
+      return false if @demo
+
       t = @last_entry_at[sym]
       t && (Time.current - t) < 90 # cool‑down 90s per underlying
     end
 
     def inside_session?(now = Time.zone.now)
+      return true if @demo
+
       t1 = Time.zone.parse(WINDOW[:start])
       t2 = Time.zone.parse(WINDOW[:stop])
       now.between?(t1, t2) && MarketCalendar.trading_day?(now.to_date)
     end
 
     def tf_for(tf)
-      { '1' => '1m', '3' => '3m', '5' => '5m', '15' => '15m' }[tf.to_s] || '5m'
+      { '1' => '1', '3' => '3', '5' => '5', '15' => '15' }[tf.to_s] || '5'
+    end
+
+    def notify_step(action, message)
+      Rails.logger.info("[AutoPilot] #{action} → #{message}")
+    end
+
+    def numeric_value?(value)
+      value.is_a?(Numeric) || value.to_s.match?(/\A-?\d+(\.\d+)?\z/)
     end
   end
 end

@@ -6,10 +6,12 @@ module Option
     IV_RANK_MAX        = 0.80
     THETA_AVOID_HOUR   = 14.5 # 2:30 PM
     TOP_RANKED_LIMIT   = 10
+    MIN_ADX            = 20
 
-    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta
+    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta, :cfg
 
-    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [])
+    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [], config: Option::ChainConfig.current)
+      @cfg = config
       @option_chain     = option_chain.with_indifferent_access
       @expiry           = Date.parse(expiry.to_s)
       @underlying_spot  = underlying_spot.to_f
@@ -48,7 +50,7 @@ module Option
       result[:trend]    = ta ? ta.bias.to_sym     : intraday_trend
       result[:momentum] = ta ? ta.momentum.to_sym : :flat
       result[:adx]      = ta&.adx
-      adx_ok            = ta ? ta.adx.to_f >= 25 : true
+      adx_ok            = ta ? ta.adx.to_f >= MIN_ADX : true
 
       if result[:proceed] && !(trend_confirms?(result[:trend], signal_type) && adx_ok && result[:momentum] != :flat)
         result[:proceed] = false

@@ -51,10 +51,10 @@ module Derivatives
         expiry: @expiry,
         underlying_spot: (chain[:last_price].presence || ltp(@instrument)).to_f,
         iv_rank: iv_rank,
-        historical_data: historical_data
+        historical_data: @instrument.intraday_ohlc(interval: '5', days: 3) || historical_data
       )
       res = analyzer.analyze(signal_type: @side, strategy_type: @strategy_type, signal_strength: @signal_strength)
-      return nil unless res[:proceed] && res[:selected]
+      return res unless res[:proceed] && res[:selected]
 
       drv = resolve_derivative(res[:selected], @expiry, @side)
       return nil unless drv
@@ -127,7 +127,7 @@ module Derivatives
     end
 
     def daily_candles
-      Dhanhq::API::Historical.daily(
+      DhanHQ::Models::HistoricalData.daily(
         securityId: @instrument.security_id,
         exchangeSegment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
@@ -139,13 +139,13 @@ module Derivatives
     end
 
     def intraday_candles
-      Dhanhq::API::Historical.intraday(
-        securityId: @instrument.security_id,
-        exchangeSegment: @instrument.exchange_segment,
+      DhanHQ::Models::HistoricalData.intraday(
+        security_id: @instrument.security_id,
+        exchange_segment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
         interval: '5',
-        fromDate: 5.days.ago.to_date.iso8601,
-        toDate: Time.zone.today.iso8601
+        from_date: 5.days.ago.to_date.iso8601,
+        to_date: Time.zone.today.iso8601
       )
     rescue StandardError
       []

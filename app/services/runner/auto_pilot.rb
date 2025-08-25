@@ -13,10 +13,18 @@ module Runner
     SCALP = MODE.new(
       name: :scalp, tf: '3', adx_min: 16, profit_arm_pct: 0.01, time_stop_s: 240, scalp: true
     )
+    DEMO = MODE.new(
+      name: :demo, tf: '1', adx_min: 0, profit_arm_pct: 0.0, time_stop_s: 0, scalp: false
+    )
 
-    def initialize(symbols:, mode: :normal, roster: nil)
-      @symbols = Array(symbols).presence || %w[NIFTY BANKNIFTY]
-      @mode    = (mode.to_s == 'scalp' ? SCALP : NORMAL)
+    def initialize(symbols: [], mode: :normal, roster: nil, demo: false)
+      @symbols = Array(symbols).presence || %w[NIFTY BANKNIFTY SENSEX]
+      @mode    = case mode.to_s
+                 when 'scalp' then SCALP
+                 when 'demo'  then DEMO
+                 else NORMAL
+                 end
+      @demo = demo || (mode.to_s == 'demo')
       @roster  = roster || @symbols
       @running = Concurrent::AtomicBoolean.new(false)
       @last_entry_at = {}
@@ -52,46 +60,104 @@ module Runner
 
         now = Time.zone.now
         run_once if inside_session?(now)
-        sleep 10 # light cadence; bars fetch is heavier below
+        sleep(@demo ? 15 : 30) # light cadence; bars fetch is heavier below
       end
     end
 
     def run_once
-      # Pull series for each symbol on the configured TF
-      Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
-        process_symbol(sym, series)
+      if @demo
+        # one-shot fetch per symbol → process immediately
+        @roster.each do |sym|
+          if (inst = fetch_instrument(sym))
+            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 2)
+            if raw.present?
+              series = CandleSeries.new(symbol: inst.symbol_name, interval: tf_for(@mode.tf))
+              series.load_from_raw(raw)
+              process_symbol(sym, series)
+            else
+              notify_step(:fetch, "no OHLC for #{sym}")
+            end
+          else
+            notify_step(:fetch, "instrument not found for #{sym}")
+          end
+        end
+      else
+        # original looping fetch
+        Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
+          process_symbol(sym, series)
+        end
+        sleep 12
+        Bars::FetchLoop.stop
       end
-      sleep 12 # let one fetch cycle finish; guard against tight loops
-      Bars::FetchLoop.stop
     end
 
     def process_symbol(sym, series)
-      return if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
+      notify_step(:gate_start, "→ #{sym} (#{@mode.name}/tf=#{@mode.tf})")
+
+      if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
+        notify_step(:gate_chop, "skip: choppy/adx<#{@mode.adx_min}")
+        return
+      else
+        notify_step(:gate_chop, "ok (adx>=#{@mode.adx_min})")
+      end
 
       trend = holy_or_supertrend(series)
-      return if %i[side neutral].include?(trend)
+      if %i[side neutral].include?(trend)
+        notify_step(:gate_trend, 'skip: neutral/side')
+        return
+      else
+        notify_step(:gate_trend, "ok: #{trend.upcase}")
+      end
 
       inst = fetch_instrument(sym)
-      return unless inst
+      unless inst
+        notify_step(:instrument, "skip: not found #{sym}")
+        return
+      end
 
       side = (trend == :up ? :ce : :pe)
-      leg  = Options::ChainAnalyzer.call(underlying: inst, side: side, config: { strategy_type: (@mode.scalp ? 'intraday' : 'intraday') })
-      return unless leg && leg[:ltp].to_f.positive?
+      notify_step(:picker, "choose side=#{side}")
 
-      # Budget/guard: 30% capital per trade; expect ~1R equal to 10% of premium baseline
+      leg = Options::ChainAnalyzer.call(
+        underlying: inst, side: side,
+        config: { strategy_type: (@mode.scalp ? 'intraday' : 'margin') }
+      )
+
+      unless leg && leg[:ltp].to_f.positive?
+        notify_step(:picker, 'skip: no leg/ltp<=0')
+        return
+      end
+      notify_step(:picker, "picked strike=#{leg[:strike]} ltp=#{leg[:ltp]} lot=#{leg[:lot_size]}")
+
       qty = leg[:lot_size].to_i
-      return if qty <= 0
+      if qty <= 0
+        notify_step(:qty, 'skip: qty<=0')
+        return
+      end
+      notify_step(:qty, "qty=#{qty}")
 
-      # Skip repeated entries too fast
-      return if entered_recently?(sym)
+      if entered_recently?(sym)
+        notify_step(:cooldown, 'skip: recent entry cool‑down')
+        return
+      end
+      notify_step(:cooldown, 'ok')
 
       sl, tp, trail = rr_for(inst, leg, series)
-      return unless risk_ok?(inst, expected_risk_rupees: qty * leg[:ltp] * 0.10) # ~10% of premium
+      notify_step(:risk_levels, "SL=#{sl} TP=#{tp} TRL=#{trail}")
+
+      expected_risk = qty * leg[:ltp] * 0.10
+      unless risk_ok?(inst, expected_risk_rupees: expected_risk)
+        notify_step(:risk_guard, "skip: risk not ok (₹#{expected_risk.round(2)})")
+        return
+      end
+      notify_step(:risk_guard, "ok (₹#{expected_risk.round(2)})")
 
       place_super(inst, side, qty, sl: sl, tp: tp, trail: trail)
-      @last_entry_at[sym] = Time.current
+      @last_entry_at[sym] = Time.current unless @demo
+      notify_step(:placed, @demo ? "DEMO: would place BUY #{side.upcase}" : 'order placed')
     rescue StandardError => e
       Rails.logger.warn("[AutoPilot] #{sym} #{e.class}: #{e.message}")
+      notify_failure(e, :process_symbol)
     end
 
     def rr_for(inst, leg, series)
@@ -137,22 +203,23 @@ module Runner
         client_ref: client_ref
       )
       Rails.logger.info("[AutoPilot] Super params → #{params}")
-      # Place or dry-run
-      if Setting.fetch_bool('PLACE_ORDER', false)
+      notify_step(:super_params, params.inspect)
+
+      # DEMO forces dry-run; otherwise keep existing PLACE_ORDER flag
+      if @demo || !Setting.fetch_bool('PLACE_ORDER', false)
+        notify("💡 DRYRUN SUPER PARAMS\n#{params.inspect}", tag: 'DRYRUN')
+      else
         order = Orders::Executor.call(
           instrument: inst, side: :buy, qty: qty, entry_type: :market,
           risk_params: { sl_value: sl, tp_value: tp, trail_sl_value: trail, trail_sl_jump: trail },
           client_ref: client_ref
         )
-        # subscribe the derivative as well
         begin
           Live::WsHub.instance.subscribe(seg: order.instrument.exchange_segment, sid: order.instrument.security_id.to_s)
         rescue StandardError
           nil
         end
         register_for_management(order, inst.symbol_name, side: side)
-      else
-        notify("💡 DRYRUN SUPER PARAMS\n#{params.inspect}", tag: 'DRYRUN')
       end
     end
 
@@ -176,8 +243,15 @@ module Runner
       end
     end
 
+    def demo_mode?
+      @demo
+    end
+
     def holy_or_supertrend(series)
-      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series))
+      cfg = demo_mode? ? Indicators::HolyGrail.demo_config : {}
+      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series), config: cfg)
+
+      notify_step(:demo_gate, "HolyGrail cfg=#{cfg.inspect}") if demo_mode?
       case hg&.bias
       when :bullish then :up
       when :bearish then :down
@@ -212,18 +286,30 @@ module Runner
     end
 
     def entered_recently?(sym)
+      return false if @demo
+
       t = @last_entry_at[sym]
       t && (Time.current - t) < 90 # cool‑down 90s per underlying
     end
 
     def inside_session?(now = Time.zone.now)
+      return true if @demo
+
       t1 = Time.zone.parse(WINDOW[:start])
       t2 = Time.zone.parse(WINDOW[:stop])
       now.between?(t1, t2) && MarketCalendar.trading_day?(now.to_date)
     end
 
     def tf_for(tf)
-      { '1' => '1m', '3' => '3m', '5' => '5m', '15' => '15m' }[tf.to_s] || '5m'
+      { '1' => '1', '3' => '3', '5' => '5', '15' => '15' }[tf.to_s] || '5'
+    end
+
+    def notify_step(action, message)
+      Rails.logger.info("[AutoPilot] #{action} → #{message}")
+    end
+
+    def numeric_value?(value)
+      value.is_a?(Numeric) || value.to_s.match?(/\A-?\d+(\.\d+)?\z/)
     end
   end
 end
