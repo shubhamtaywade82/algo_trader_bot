@@ -3,16 +3,6 @@ class ApplicationController < ActionController::API
 end
 
 
-# File: app/controllers/holdings_controller.rb
-class HoldingsController < ApplicationController
-end
-
-
-# File: app/controllers/positions_controller.rb
-class PositionsController < ApplicationController
-end
-
-
 # File: app/jobs/application_job.rb
 class ApplicationJob < ActiveJob::Base
   # Automatically retry jobs that encountered a deadlock
@@ -22,49 +12,6 @@ class ApplicationJob < ActiveJob::Base
   # discard_on ActiveJob::DeserializationError
 end
 
-
-# File: app/jobs/mtf_start_job.rb
-# app/jobs/mtf_start_job.rb
-class MtfStartJob < ApplicationJob
-  queue_as :default
-  def perform
-    # Live::WsHub.instance.start!(mode: :quote) # already in initializer; idempotent
-    Runner::MtfLoop.start(symbols: %w[NIFTY BANKNIFTY], timeframe: '15m')
-  end
-end
-
-
-# File: app/jobs/scalp_session_runner_job.rb
-class ScalpSessionRunnerJob < ApplicationJob
-  queue_as :default
-
-  # Long-running job – ensure delayed_job timeout is high enough or disabled for this queue
-  def perform(date: Date.current, capital: 100_000.0, max_day_loss: 3000.0, roster: %w[NIFTY BANKNIFTY], risk_rupees: 600.0)
-    session = ScalpSession.find_or_create_by!(trade_date: date) do |s|
-      s.capital      = capital
-      s.max_day_loss = max_day_loss
-      s.params = {
-        'risk_rupees' => risk_rupees,
-        'roster' => roster,
-        'profit_trigger_rupees' => 1000.0,
-        'no_entries_after' => '15:00'
-      }
-    end
-    Scalp::Runner.call(session: session)
-  end
-end
-
-# File: app/jobs/scalp_session_stop_job.rb
-class ScalpSessionStopJob < ApplicationJob
-  queue_as :default
-
-  def perform(date: Date.current)
-    if (session = ScalpSession.find_by(trade_date: date))
-      # simple signal: flip status → runner loop will see it
-      session.update!(status: :killed)
-    end
-  end
-end
 
 # File: app/lib/state/events.rb
 # app/lib/state/events.rb
@@ -276,6 +223,17 @@ class CandleSeries
   def closes = candles.map(&:close)
   def highs  = candles.map(&:high)
   def lows   = candles.map(&:low)
+
+  def to_hash
+    {
+      'timestamp' => candles.map { |c| c.timestamp.to_i },
+      'open' => opens,
+      'high' => highs,
+      'low' => lows,
+      'close' => closes,
+      'volume' => candles.map(&:volume)
+    }
+  end
 
   def hlc
     candles.each_with_index.map do |c, _i|
@@ -863,75 +821,6 @@ class Setting < ApplicationRecord
   end
 end
 
-# File: app/services/algo_runner.rb
-class AlgoRunner
-  def self.execute_all
-    Instrument.watchlist.find_each do |inst|
-      result = Strategies::BasicTrendStrategy.call(inst)
-      case result
-      when :buy_ce
-        Execution::OrderExecutor.buy_option_ce(inst)
-      end
-    end
-  end
-end
-
-# File: app/services/analysis/options_behaviour_analyzer.rb
-module Analysis
-  class OptionsBehaviourAnalyzer < ApplicationService
-    def initialize(option_chain:, expiry:, underlying_spot:, symbol:, historical: [])
-      @chain = option_chain.with_indifferent_access
-      @expiry = expiry
-      @spot = underlying_spot
-      @symbol = symbol
-      @historical = historical
-    end
-
-    def call
-      atm = determine_atm
-      return nil unless atm
-
-      analysis = {
-        symbol: @symbol,
-        expiry: @expiry,
-        spot: @spot,
-        atm: atm,
-        ce: extract_behaviour_data(atm, :ce),
-        pe: extract_behaviour_data(atm, :pe),
-        time: Time.zone.now
-      }
-
-      notify("🧠 Behaviour Data Prepared for #{@symbol}\n\n#{analysis.inspect.truncate(1200)}", tag: 'OPTIONS_BEHAVIOUR')
-
-      analysis
-    end
-
-    private
-
-    def determine_atm
-      @chain[:oc].keys.map(&:to_f).min_by { |s| (@spot - s).abs }
-    end
-
-    def extract_behaviour_data(strike, side)
-      data = @chain[:oc][format('%.6f', strike)][side.to_s]
-      return {} unless data
-
-      {
-        last_price: data['last_price'],
-        iv: data['implied_volatility'],
-        delta: data.dig('greeks', 'delta'),
-        gamma: data.dig('greeks', 'gamma'),
-        theta: data.dig('greeks', 'theta'),
-        vega: data.dig('greeks', 'vega'),
-        oi: data['oi'],
-        volume: data['volume'],
-        price_change: data['last_price'].to_f - data['previous_close_price'].to_f,
-        oi_change: data['oi'].to_i - data['previous_oi'].to_i
-      }
-    end
-  end
-end
-
 # File: app/services/application_service.rb
 # frozen_string_literal: true
 
@@ -1175,7 +1064,7 @@ module Derivatives
         expiry: @expiry,
         underlying_spot: (chain[:last_price].presence || ltp(@instrument)).to_f,
         iv_rank: iv_rank,
-        historical_data: historical_data
+        historical_data: @instrument.intraday_ohlc(interval: '5', days: 3) || historical_data
       )
       res = analyzer.analyze(signal_type: @side, strategy_type: @strategy_type, signal_strength: @signal_strength)
       return nil unless res[:proceed] && res[:selected]
@@ -1251,7 +1140,7 @@ module Derivatives
     end
 
     def daily_candles
-      Dhanhq::API::Historical.daily(
+      DhanHQ::Models::HistoricalData.daily(
         securityId: @instrument.security_id,
         exchangeSegment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
@@ -1263,13 +1152,13 @@ module Derivatives
     end
 
     def intraday_candles
-      Dhanhq::API::Historical.intraday(
-        securityId: @instrument.security_id,
-        exchangeSegment: @instrument.exchange_segment,
+      DhanHQ::Models::HistoricalData.intraday(
+        security_id: @instrument.security_id,
+        exchange_segment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
         interval: '5',
-        fromDate: 5.days.ago.to_date.iso8601,
-        toDate: Time.zone.today.iso8601
+        from_date: 5.days.ago.to_date.iso8601,
+        to_date: Time.zone.today.iso8601
       )
     rescue StandardError
       []
@@ -1571,63 +1460,6 @@ class Exits::MicroTP < ApplicationService
 end
 
 
-# File: app/services/indicators/breaker_block.rb
-module Indicators
-  class BreakerBlock
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def identify
-      breakers = []
-
-      @candles.each_with_index do |candle, i|
-        next if i < 5
-
-        prev = @candles[i - 1]
-        before_prev = @candles[i - 2]
-
-        # 1️⃣ Detect bullish breaker (failed bullish OB -> turns bearish)
-        if bullish_ob_fail?(before_prev, prev, candle)
-          breakers << {
-            type: :bearish_breaker,
-            breaker_zone: { high: before_prev.high, low: before_prev.low },
-            broken_at: candle.timestamp,
-            retest_pending: true
-          }
-        end
-
-        # 2️⃣ Detect bearish breaker (failed bearish OB -> turns bullish)
-        next unless bearish_ob_fail?(before_prev, prev, candle)
-
-        breakers << {
-          type: :bullish_breaker,
-          breaker_zone: { high: before_prev.high, low: before_prev.low },
-          broken_at: candle.timestamp,
-          retest_pending: true
-        }
-      end
-
-      breakers
-    end
-
-    private
-
-    def bullish_ob_fail?(ob, next_candle, breaker_candle)
-      ob.bullish? &&
-        next_candle.low < ob.low &&         # OB invalidated
-        breaker_candle.close > ob.high      # Breaker confirmation
-    end
-
-    def bearish_ob_fail?(ob, next_candle, breaker_candle)
-      ob.bearish? &&
-        next_candle.high > ob.high &&       # OB invalidated
-        breaker_candle.close < ob.low       # Breaker confirmation
-    end
-  end
-end
-
 # File: app/services/indicators/calculator.rb
 module Indicators
   class Calculator
@@ -1664,28 +1496,6 @@ module Indicators
     end
   end
 end
-
-# File: app/services/indicators/fair_value_gap.rb
-module Indicators
-  class FairValueGap
-    def initialize(series)
-      @series = series
-    end
-
-    def detect
-      fvg_zones = []
-      @series.each_cons(3).with_index do |(c1, _c2, c3), i|
-        if c3.low > c1.high
-          fvg_zones << { index: i + 1, from: c1.high, to: c3.low, direction: :up }
-        elsif c3.high < c1.low
-          fvg_zones << { index: i + 1, from: c3.high, to: c1.low, direction: :down }
-        end
-      end
-      fvg_zones
-    end
-  end
-end
-
 
 # File: app/services/indicators/holy_grail.rb
 # app/services/indicators/holy_grail.rb
@@ -1736,7 +1546,7 @@ module Indicators
         adx_gate: 0.0,
         rsi_up_min: 0.0,
         rsi_down_max: 100.0,
-        min_candles: 10 # allow tiny series in demo
+        min_candles: 1 # allow tiny series in demo
       }
     end
 
@@ -1867,130 +1677,6 @@ module Indicators
 
     def adx(len)
       TA::Adx.calculate(ohlc_rows.last(len * 2), period: len).first.adx
-    end
-  end
-end
-
-
-# File: app/services/indicators/intrinio_wrapper.rb
-# app/services/indicators/intrinio_wrapper.rb
-module Indicators
-  class IntrinioWrapper
-    SUPPORTED = TechnicalAnalysis::Indicator.names.map(&:to_s)
-    attr_reader :data
-
-    def initialize(data)
-      @data = data
-    end
-
-    # example: RSI
-    def rsi(period: 14)
-      vals = TechnicalAnalysis::Rsi.calculate(data,
-                                              period: period, price_key: :close)
-      vals.map(&:value)
-    end
-
-    def adx(period: 14)
-      vals = TechnicalAnalysis::Adx.calculate(data, period: period, price_key: :close)
-      vals.map(&:adx)
-    end
-
-    def macd(fast: 12, slow: 26, signal: 9)
-      TechnicalAnalysis::Macd.calculate(data,
-                                        fast_period: fast, slow_period: slow, signal_period: signal, price_key: :close)
-    end
-
-    def obv
-      TechnicalAnalysis::Obv.calculate(data, price_key: :close, volume_key: :volume)
-    end
-
-    # .. auto-generate other wrappers via meta-programming if you like
-    def self.supports?(name)
-      SUPPORTED.include?(name.to_s)
-    end
-  rescue TechnicalAnalysis::ValidationError => e
-    Rails.logger.warn("[IntrinioWrapper] #{e.class}: #{e.message}")
-    []
-  end
-end
-
-
-# File: app/services/indicators/order_block.rb
-module Indicators
-  class OrderBlock
-    def initialize(series)
-      @series = series
-    end
-
-    def bullish_order_blocks
-      @series.each_cons(3).with_index.filter_map do |(prev, curr, next_c), i|
-        { index: i + 1, low: curr.low, high: curr.high } if curr.bearish? && next_c.bullish? && next_c.close > prev.high
-      end
-    end
-
-    def bearish_order_blocks
-      @series.each_cons(3).with_index.filter_map do |(prev, curr, next_c), i|
-        { index: i + 1, low: curr.low, high: curr.high } if curr.bullish? && next_c.bearish? && next_c.close < prev.low
-      end
-    end
-  end
-end
-
-
-# File: app/services/indicators/ruby_ta_wrapper.rb
-# app/services/indicators/ruby_ta_wrapper.rb
-module Indicators
-  class RubyTAWrapper
-    SUPPORTED = %w[
-      rsi macd stochastic_intraday momentum_index chaikin_money_flow
-      bollinger_bands pivot_points mass_index qstick rate_of_change
-      wilders_smoothing volume_oscillator williams_r price_channel
-    ].freeze
-    attr_reader :series
-
-    def initialize(series) = @series = series
-
-    # e.g.
-    def rsi(period: 14)
-      t = RubyTechnicalAnalysis::RelativeStrengthIndex.new(
-               series: series.closes, period: period
-             )
-      t.valid? ? t.call : []
-    end
-
-    def macd(fast: 12, slow: 26, signal: 9)
-      t = RubyTechnicalAnalysis::MACD.new(series: series.closes,
-                                          fast_period: fast, slow_period: slow, signal_period: signal)
-      t.valid? ? t.call : []
-    end
-
-    # ... same pattern for other SUPPORTED indicators
-
-    def self.supports?(name)
-      SUPPORTED.include?(name.to_s)
-    end
-  end
-end
-
-
-# File: app/services/indicators/structure.rb
-module Indicators
-  class Structure
-    def initialize(series:)
-      @series = series
-    end
-
-    def break_of_structure
-      bos_points = []
-
-      @series.candles.each_with_index do |c, i|
-        if @series.swing_high?(i) && c.close < c.open
-          bos_points << { index: i, type: :bos, direction: :down }
-        elsif @series.swing_low?(i) && c.close > c.open
-          bos_points << { index: i, type: :bos, direction: :up }
-        end
-      end
-      bos_points
     end
   end
 end
@@ -2506,130 +2192,6 @@ module MarketCalendar
 end
 
 
-# File: app/services/mtf/fvg.rb
-# frozen_string_literal: true
-
-module Mtf
-  class Fvg
-    Gap = Struct.new(:dir, :i, :hi, :lo, keyword_init: true) # dir :up/:down, i = middle bar index
-
-    # Classic 3-candle Fvg:
-    #  up: low[i+1] > high[i-1]
-    # down: high[i+1] < low[i-1]
-    def self.scan(series, lookback: 30)
-      out = []
-      bars = series.candles
-      return out if bars.size < 3
-
-      start = [0, bars.size - lookback - 1].max
-      (start...(bars.size - 1)).each do |i|
-        prev = begin
-          bars[i - 1]
-        rescue StandardError
-          nil
-        end
-        nxt = begin
-          bars[i + 1]
-        rescue StandardError
-          nil
-        end
-        next unless prev && nxt
-
-        if nxt.low > prev.high
-          out << Gap.new(dir: :up, i: i, hi: prev.high, lo: nxt.low)
-        elsif nxt.high < prev.low
-          out << Gap.new(dir: :down, i: i, hi: nxt.high, lo: prev.low)
-        end
-      end
-      out
-    end
-
-    def self.price_in_gap?(gap, price)
-      return false unless gap
-
-      price > gap.hi && price < gap.lo
-    end
-  end
-end
-
-
-# File: app/services/mtf/liquidity.rb
-# frozen_string_literal: true
-
-module Mtf
-  class Liquidity
-    Pool = Struct.new(:kind, :i1, :i2, :level, keyword_init: true) # :eq_highs/:eq_lows
-
-    def self.equal_highs(series, tol_pct: 0.0005, lookback: 40)
-      scan(series, :high, :eq_highs, tol_pct: tol_pct, lookback: lookback)
-    end
-
-    def self.equal_lows(series, tol_pct: 0.0005, lookback: 40)
-      scan(series, :low, :eq_lows, tol_pct: tol_pct, lookback: lookback)
-    end
-
-    def self.scan(series, field, kind, tol_pct:, lookback:)
-      bars = series.candles.last(lookback)
-      out  = []
-      (0...(bars.size - 1)).each do |i|
-        a = bars[i].public_send(field)
-        b = bars[i + 1].public_send(field)
-        next if [a, b].any?(&:nil?)
-
-        tol = [a, b].max * tol_pct
-        out << Pool.new(kind: kind, i1: i, i2: i + 1, level: (a + b) / 2.0) if (a - b).abs <= tol
-      end
-      out
-    end
-  end
-end
-
-# File: app/services/mtf/order_block.rb
-# frozen_string_literal: true
-
-module Mtf
-  class OrderBlock
-    Zone = Struct.new(:kind, :index, :open, :high, :low, :close, keyword_init: true) # kind: :demand/:supply
-
-    # last down candle before up-BOS → demand; last up candle before down-BOS → supply
-    def self.last_before_bos(series, bos_sig)
-      return nil unless bos_sig&.kind == :BOS
-
-      bars = series.candles
-      i    = bars.size - 2
-
-      if bos_sig.dir == :up
-        # find last bearish candle before BOS index
-        while i >= 1 && i > bos_sig.at_index - 20
-          c = bars[i]
-          return Zone.new(kind: :demand, index: i, open: c.open, high: c.high, low: c.low, close: c.close) if c.close < c.open
-
-          i -= 1
-        end
-      else
-        while i >= 1 && i > bos_sig.at_index - 20
-          c = bars[i]
-          return Zone.new(kind: :supply, index: i, open: c.open, high: c.high, low: c.low, close: c.close) if c.close > c.open
-
-          i -= 1
-        end
-      end
-      nil
-    end
-
-    # price-in-zone test (allow wick tolerance)
-    def self.price_touches?(zone, price, pad_pct: 0.0005)
-      return false unless zone
-
-      lo = [zone.low, zone.open, zone.close].min
-      hi = [zone.high, zone.open, zone.close].max
-      pad = (hi - lo) * pad_pct
-      (price >= lo - pad) && (price <= hi + pad)
-    end
-  end
-end
-
-
 # File: app/services/mtf/resampler.rb
 # frozen_string_literal: true
 
@@ -2707,88 +2269,6 @@ module Mtf
 end
 
 
-# File: app/services/mtf/structure.rb
-# frozen_string_literal: true
-
-module Mtf
-  class Structure
-    Sig = Struct.new(:kind, :at_index, :price, :dir, keyword_init: true) # kind: :BOS/:CHOCH, dir: :up/:down
-
-    # returns :up (HH/HL) | :down (LH/LL) | :range
-    def self.trend(series, lookback: 5)
-      highs = series.highs.last(lookback + 3)
-      lows  = series.lows.last(lookback + 3)
-
-      return :range if highs.size < 4
-
-      higher_highs = highs.each_cons(2).all? { |a, b| b >= a }
-      higher_lows  = lows.each_cons(2).all?  { |a, b| b >= a }
-      lower_highs  = highs.each_cons(2).all? { |a, b| b <= a }
-      lower_lows   = lows.each_cons(2).all?  { |a, b| b <= a }
-
-      return :up   if higher_highs && higher_lows
-      return :down if lower_highs && lower_lows
-
-      :range
-    end
-
-    # BOS = current close breaks last swing extreme in trend direction
-    def self.bos(series, dir:)
-      idx = series.candles.size - 1
-      return nil if idx < 3
-
-      last_close = series.candles.last.close
-      swings_h   = swing_highs(series, lookback: 2).last(5)
-      swings_l   = swing_lows(series,  lookback: 2).last(5)
-
-      if dir == :up && swings_h.last && last_close > swings_h.last[:price]
-        return Sig.new(kind: :BOS, at_index: idx, price: last_close, dir: :up)
-      elsif dir == :down && swings_l.last && last_close < swings_l.last[:price]
-        return Sig.new(kind: :BOS, at_index: idx, price: last_close, dir: :down)
-      end
-
-      nil
-    end
-
-    # CHOCH = break opposite to prior trend (simple)
-    def self.choch(series, prior_dir:)
-      idx = series.candles.size - 1
-      last_close = series.candles.last.close
-      swings_h   = swing_highs(series, lookback: 2).last(5)
-      swings_l   = swing_lows(series,  lookback: 2).last(5)
-
-      if prior_dir == :up && swings_l.last && last_close < swings_l.last[:price]
-        return Sig.new(kind: :CHOCH, at_index: idx, price: last_close, dir: :down)
-      elsif prior_dir == :down && swings_h.last && last_close > swings_h.last[:price]
-        return Sig.new(kind: :CHOCH, at_index: idx, price: last_close, dir: :up)
-      end
-
-      nil
-    end
-
-    def self.swing_highs(series, lookback: 2)
-      out = []
-      series.candles.each_with_index do |c, i|
-        next unless series.swing_high?(i, lookback)
-
-        out << { i: i, price: c.high }
-      end
-      out
-    end
-
-    def self.swing_lows(series, lookback: 2)
-      out = []
-      series.candles.each_with_index do |c, i|
-        next unless series.swing_low?(i, lookback)
-
-        out << { i: i, price: c.low }
-      end
-      out
-    end
-  end
-end
-
-
 # File: app/services/openai/behaviour_explainer.rb
 module Openai
   class BehaviourExplainer < ApplicationService
@@ -2858,10 +2338,12 @@ module Option
     IV_RANK_MAX        = 0.80
     THETA_AVOID_HOUR   = 14.5 # 2:30 PM
     TOP_RANKED_LIMIT   = 10
+    MIN_ADX            = 20
 
-    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta
+    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta, :cfg
 
-    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [])
+    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [], config: Option::ChainConfig.current)
+      @cfg = config
       @option_chain     = option_chain.with_indifferent_access
       @expiry           = Date.parse(expiry.to_s)
       @underlying_spot  = underlying_spot.to_f
@@ -2900,7 +2382,7 @@ module Option
       result[:trend]    = ta ? ta.bias.to_sym     : intraday_trend
       result[:momentum] = ta ? ta.momentum.to_sym : :flat
       result[:adx]      = ta&.adx
-      adx_ok            = ta ? ta.adx.to_f >= 25 : true
+      adx_ok            = ta ? ta.adx.to_f >= MIN_ADX : true
 
       if result[:proceed] && !(trend_confirms?(result[:trend], signal_type) && adx_ok && result[:momentum] != :flat)
         result[:proceed] = false
@@ -3169,51 +2651,103 @@ module Option
 end
 
 
+# File: app/services/option/chain_config.rb
+# frozen_string_literal: true
+
+module Option
+  class ChainConfig
+    class << self
+      def current = new
+
+      # ------------- gates -------------
+      def iv_rank_min        = Setting.fetch_f('opt.iv_rank_min', 0.00)
+      def iv_rank_max        = Setting.fetch_f('opt.iv_rank_max', 0.80)
+      def theta_avoid_hour   = Setting.fetch_f('opt.theta_avoid_hour', 14.5) # 2:30pm
+      def min_adx            = Setting.fetch_f('opt.min_adx', 25.0)
+
+      # ------------- ranking -----------
+      def top_ranked_limit   = Setting.fetch_i('opt.top_ranked_limit', 10)
+      def efficiency_weight  = Setting.fetch_f('opt.efficiency_weight', 30.0)
+
+      # ------------- Δ thresholds by hour -----------
+      # Hours are 24h integer keys; value = min |Δ|
+      def min_delta_by_hour
+        json = Setting.fetch('opt.min_delta_by_hour_json', nil)
+        (json ? JSON.parse(json) : { '11' => 0.30, '13' => 0.35, '14' => 0.45, 'else' => 0.25 })
+          .transform_keys!(&:to_s)
+      rescue StandardError
+        { '11' => 0.30, '13' => 0.35, '14' => 0.45, 'else' => 0.25 }
+      end
+
+      # ------------- ATM band by IV rank -----------
+      # Each tuple: [max_iv_rank, pct_band]
+      def atm_bands
+        json = Setting.fetch('opt.atm_bands_json', nil)
+        json ? JSON.parse(json) : [[0.20, 0.010], [0.50, 0.015], [1.00, 0.025]]
+      rescue StandardError
+        [[0.20, 0.010], [0.50, 0.015], [1.00, 0.025]]
+      end
+
+      # ------------- scoring knobs -----------
+      def lw_intraday = Setting.fetch_f('opt.liquidity_weight_intraday', 0.35)
+      def mw_intraday = Setting.fetch_f('opt.momentum_weight_intraday', 0.35)
+      def gw_intraday = Setting.fetch_f('opt.greeks_weight_intraday',   0.30)
+
+      def lw_swing    = Setting.fetch_f('opt.liquidity_weight_swing',   0.25)
+      def mw_swing    = Setting.fetch_f('opt.momentum_weight_swing',    0.25)
+      def gw_swing    = Setting.fetch_f('opt.greeks_weight_swing',      0.50)
+
+      def theta_weight_before_13 = Setting.fetch_f('opt.theta_weight_before_13', 3.0)
+      def theta_weight_after_13  = Setting.fetch_f('opt.theta_weight_after_13',  4.0)
+      def theta_penalty_days     = Setting.fetch_i('opt.theta_penalty_days', 3)
+      def theta_penalty_mult     = Setting.fetch_f('opt.theta_penalty_mult', 2.0)
+
+      def momentum_strong_boost  = Setting.fetch_f('opt.momentum_strong_boost', 1.15)
+
+      # IV skew / z‑score adjustments
+      def zscore_penalize_above  = Setting.fetch_f('opt.zscore_penalize_above', 1.5)
+      def zscore_factor          = Setting.fetch_f('opt.zscore_factor', 0.90)
+      def skew_tilt_boost        = Setting.fetch_f('opt.skew_tilt_boost', 1.10)
+
+      # IV vs HV sanity
+      def iv_hv_ratio_cap        = Setting.fetch_f('opt.iv_hv_ratio_cap', 1.5)
+      def iv_hv_ratio_factor     = Setting.fetch_f('opt.iv_hv_ratio_factor', 0.90)
+
+      # Misc
+      def atm_window_strikes     = Setting.fetch_i('opt.atm_window_strikes', 3)
+    end
+  end
+end
+
+
 # File: app/services/options/chain_analyzer.rb
 # frozen_string_literal: true
 
 module Options
-  # Facade for legacy callers. Picks ATM± range via Option::ChainAnalyzer and
-  # returns a single best row with derivative details (security_id, lot_size, …)
+  # Backcompat facade: delegates selection to Derivatives::Picker (which uses
+  # Option::ChainAnalyzer under the hood) and returns the old "legacy row" hash.
   class ChainAnalyzer < ApplicationService
     def initialize(underlying:, side:, config: {})
       @ul     = underlying
       @side   = side.to_s.downcase.to_sym # :ce / :pe
-      @config = {
-        strategy_type: 'intraday'
-      }.merge(config || {})
+      @config = { strategy_type: 'intraday' }.merge(config || {})
     end
 
     def call
-      expiry = nearest_expiry(@ul)
-      return nil unless expiry
-
-      chain = safe_fetch_option_chain(@ul, expiry)
-      return nil if chain.blank? || chain[:oc].blank?
-
-      iv_rank = compute_iv_rank(chain)
-      spot    = chain[:last_price].to_f.nonzero? || @ul.ws_ltp || @ul.ltp
-      hist    = intraday_candles(@ul)
-
-      # Use the advanced analyzer
-      analyzer = Option::ChainAnalyzer.new(
-        chain,
-        expiry: expiry,
-        underlying_spot: spot.to_f,
-        iv_rank: iv_rank,
-        historical_data: hist
+      pick = Derivatives::Picker.call(
+        instrument: @ul,
+        side: @side,
+        strategy_type: @config[:strategy_type]
       )
 
-      result = analyzer.analyze(signal_type: @side, strategy_type: @config[:strategy_type])
+      return nil unless pick&.selected && pick.derivative
 
-      return nil unless result[:proceed] && (sel = result[:selected])
+      # Re-fetch chain for the chosen expiry to extract bid/ask exactly like before
+      chain = safe_fetch_option_chain(@ul, pick.expiry)
+      return nil if chain.blank? || chain[:oc].blank?
 
-      # Enrich with derivative info (security_id, lot, segment) and bid/ask
-      leg = to_legacy_row(@ul, chain, sel, expiry, @side)
-      return nil unless leg
-
-      # Final light guard (keeps your old expectations: non‑zero price, etc.)
-      return nil if leg[:ltp].to_f <= 0
+      leg = to_legacy_row(@ul, chain, pick.selected, pick.expiry, pick.side)
+      return nil unless leg && leg[:ltp].to_f.positive?
 
       leg
     rescue StandardError => e
@@ -3223,12 +2757,6 @@ module Options
 
     private
 
-    def nearest_expiry(inst)
-      Array(inst.expiry_list).first
-    rescue StandardError
-      nil
-    end
-
     def safe_fetch_option_chain(inst, expiry)
       inst.fetch_option_chain(expiry)
     rescue StandardError => e
@@ -3236,54 +2764,16 @@ module Options
       nil
     end
 
-    # Same formula you used inside AlertProcessors::Index#iv_rank_for
-    def compute_iv_rank(chain)
-      atm = determine_atm_strike(chain)
-      return 0.5 unless atm
-
-      key   = format('%.6f', atm)
-      ce_iv = chain[:oc].dig(key, 'ce', 'implied_volatility').to_f
-      pe_iv = chain[:oc].dig(key, 'pe', 'implied_volatility').to_f
-      cur   = [ce_iv, pe_iv].select(&:positive?).then { |arr| arr.empty? ? 0.0 : (arr.sum / arr.size) }
-
-      ivs = chain[:oc].values.flat_map { |row| %w[ce pe].map { |k| row.dig(k, 'implied_volatility').to_f } }.reject(&:zero?)
-      return 0.5 if ivs.empty? || ivs.max == ivs.min
-
-      ((cur - ivs.min) / (ivs.max - ivs.min)).clamp(0, 1).round(2)
-    rescue StandardError
-      0.5
-    end
-
-    def determine_atm_strike(chain)
-      spot = chain[:last_price].to_f
-      chain[:oc].keys.map(&:to_f).min_by { |s| (s - spot).abs }
-    rescue StandardError
-      nil
-    end
-
-    def intraday_candles(inst)
-      DhanHQ::Models::HistoricalData.intraday(
-        security_id: inst.security_id,
-        exchange_segment: inst.exchange_segment,
-        instrument: inst.instrument_type,
-        interval: '5',
-        from_date: 5.days.ago.to_date.to_s,
-        to_date: Time.zone.today.to_s
-      )
-    rescue StandardError
-      []
-    end
-
+    # unchanged: exactly your previous mapper, so legacy consumers get the same shape/fields
     def to_legacy_row(inst, chain, sel, expiry, side)
       strike_f = sel[:strike_price].to_f
       strike_key = format('%.6f', strike_f)
       side_s     = side.to_s
 
-      node       = chain[:oc][strike_key]
-      side_node  = node && node[side_s]
+      node      = chain[:oc][strike_key]
+      side_node = node && node[side_s]
       return nil unless side_node
 
-      # Map to DB derivative
       derivative = inst.derivatives.find_by(
         strike_price: strike_f,
         expiry_date: expiry,
@@ -3291,14 +2781,13 @@ module Options
       )
       return nil unless derivative
 
-      bid = side_node['top_bid_price'].to_f
-      ask = side_node['top_ask_price'].to_f
-      mid = [(bid + ask) / 2.0, sel[:last_price].to_f].compact.max
-      spread = ask.positive? && bid.positive? ? (ask - bid).abs : nil
+      bid     = side_node['top_bid_price'].to_f
+      ask     = side_node['top_ask_price'].to_f
+      mid     = [(bid + ask) / 2.0, sel[:last_price].to_f].compact.max
+      spread  = ask.positive? && bid.positive? ? (ask - bid).abs : nil
       spread_pct = mid.positive? && spread ? ((spread / mid) * 100.0) : nil
 
       {
-        # legacy shape expected by Strategy loop
         security_id: derivative.security_id,
         symbol: derivative.symbol_name || inst.symbol_name,
         cp: side.to_s.upcase.to_sym, # :CE / :PE
@@ -3693,7 +3182,6 @@ module Portfolio
       arr = DhanHQ::Models::Position.all
 
       Array(arr).each do |p|
-        pp p
         Position
           .find_or_initialize_by(exchange_segment: p.exchange_segment, security_id: p.security_id)
           .update!(
@@ -3760,64 +3248,65 @@ end
 # File: app/services/regime/chop_detector.rb
 # app/services/regime/chop_detector.rb
 # Detects sideways/range conditions using lightweight signals from CandleSeries.
-class Regime::ChopDetector
-  # Any 2 true ⇒ choppy
-  # cs5/cs15 are CandleSeries instances (5m/15m) you already have.
-  def self.choppy_pre_entry?(cs5, cs15, opts = {})
-    adx_th    = (opts[:adx_min] || 18).to_i
-    atr_mult  = (opts[:atr_quiet_mult] || 0.8).to_f
-    cross_win = (opts[:vwap_cross_window] || 30).to_i
+module Regime
+  class ChopDetector
+    # Any 2 true ⇒ choppy
+    # cs5/cs15 are CandleSeries instances (5m/15m) you already have.
+    def self.choppy_pre_entry?(cs5, cs15, opts = {})
+      adx_th    = (opts[:adx_min] || 18).to_i
+      atr_mult  = (opts[:atr_quiet_mult] || 0.8).to_f
+      cross_win = (opts[:vwap_cross_window] || 30).to_i
 
-    low_adx   = safe { cs5.adx(14) }&.<(adx_th) || false
-    quiet_atr = begin
-      atr_now  = safe { cs5.atr(5) } || 0.0
-      atr_med  = safe { cs5.atr(5).median(50) } || atr_now
-      atr_now > 0 && atr_med > 0 && (atr_now < atr_med * atr_mult)
+      low_adx   = safe { cs5.adx(14) }&.<(adx_th) || false
+      quiet_atr = begin
+        atr_now  = safe { cs5.atr(5) } || 0.0
+        atr_med  = safe { cs5.atr(5).median(50) } || atr_now
+        atr_now.positive? && atr_med.positive? && (atr_now < atr_med * atr_mult)
+      rescue StandardError
+        false
+      end
+      vwap_x    = vwap_crossings(cs5, cross_win) >= 3
+      nr5       = narrow_range?(cs5, 5)
+
+      [low_adx, quiet_atr, vwap_x, nr5].count(true) >= 2
+    end
+
+    # ---- helpers ----
+
+    def self.vwap_crossings(cs, window)
+      vwap = safe { cs.vwap_series(window: window) } # preferred if you have it
+      closes = safe { cs.close_series(window: window) }
+      if vwap && closes && vwap.size == closes.size && vwap.size > 1
+        signs = closes.zip(vwap).map { |c, v| (c <=> v) } # -1, 0, 1
+        signs.each_cons(2).count { |a, b| (a <=> b) == -1 || (a <=> b) == 1 }
+      else
+        # Fallback: approximate with current vwap line if only one value
+        0
+      end
+    rescue StandardError
+      0
+    end
+
+    def self.narrow_range?(cs, n)
+      # NR(n): current bar range <= min range of last n bars
+      bars = safe { cs.last_n(n + 1) } || []
+      return false unless bars.size >= 2
+
+      rng = ->(b) { (b[:high] - b[:low]).to_f }
+      cur = rng.call(bars.last)
+      hist = bars[0...-1].map(&rng)
+      cur <= hist.min
     rescue StandardError
       false
     end
-    vwap_x    = vwap_crossings(cs5, cross_win) >= 3
-    nr5       = narrow_range?(cs5, 5)
 
-    [low_adx, quiet_atr, vwap_x, nr5].count(true) >= 2
-  end
-
-  # ---- helpers ----
-
-  def self.vwap_crossings(cs, window)
-    vwap = safe { cs.vwap_series(window: window) } # preferred if you have it
-    closes = safe { cs.close_series(window: window) }
-    if vwap && closes && vwap.size == closes.size && vwap.size > 1
-      signs = closes.zip(vwap).map { |c, v| (c <=> v) } # -1, 0, 1
-      signs.each_cons(2).count { |a, b| (a <=> b) == -1 || (a <=> b) == 1 }
-    else
-      # Fallback: approximate with current vwap line if only one value
-      0
+    def self.safe(&)
+      yield
+    rescue StandardError
+      nil
     end
-  rescue StandardError
-    0
-  end
-
-  def self.narrow_range?(cs, n)
-    # NR(n): current bar range <= min range of last n bars
-    bars = safe { cs.last_n(n + 1) } || []
-    return false unless bars.size >= 2
-
-    rng = ->(b) { (b[:high] - b[:low]).to_f }
-    cur = rng.call(bars.last)
-    hist = bars[0...-1].map(&rng)
-    cur <= hist.min
-  rescue StandardError
-    false
-  end
-
-  def self.safe(&)
-    yield
-  rescue StandardError
-    nil
   end
 end
-
 
 # File: app/services/risk/guard.rb
 module Risk
@@ -4026,7 +3515,7 @@ module Runner
         # one-shot fetch per symbol → process immediately
         @roster.each do |sym|
           if (inst = fetch_instrument(sym))
-            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 2)
+            raw = inst.intraday_ohlc(interval: tf_for(@mode.tf), days: 5)
             if raw.present?
               series = CandleSeries.new(symbol: inst.symbol_name, interval: tf_for(@mode.tf))
               series.load_from_raw(raw)
@@ -4067,7 +3556,6 @@ module Runner
       end
 
       inst = fetch_instrument(sym)
-      pp inst
       unless inst
         notify_step(:instrument, "skip: not found #{sym}")
         return
@@ -4078,9 +3566,9 @@ module Runner
 
       leg = Options::ChainAnalyzer.call(
         underlying: inst, side: side,
-        config: { strategy_type: (@mode.scalp ? 'intraday' : 'market') }
+        config: { strategy_type: (@mode.scalp ? 'intraday' : 'margin') }
       )
-      pp leg
+
       unless leg && leg[:ltp].to_f.positive?
         notify_step(:picker, 'skip: no leg/ltp<=0')
         return
@@ -4207,7 +3695,7 @@ module Runner
 
     def holy_or_supertrend(series)
       cfg = demo_mode? ? Indicators::HolyGrail.demo_config : {}
-      hg = Indicators::HolyGrail.call(candles: to_dhan_hash(series), config: cfg)
+      hg = Indicators::HolyGrail.call(candles: series.to_hash, config: cfg)
 
       notify_step(:demo_gate, "HolyGrail cfg=#{cfg.inspect}") if demo_mode?
       case hg&.bias
@@ -4268,73 +3756,6 @@ module Runner
 
     def numeric_value?(value)
       value.is_a?(Numeric) || value.to_s.match?(/\A-?\d+(\.\d+)?\z/)
-    end
-  end
-end
-
-
-# File: app/services/runner/mtf_loop.rb
-# frozen_string_literal: true
-
-module Runner
-  class MtfLoop
-    class << self
-      def start(symbols:, timeframe: '15m')
-        stop
-        @running = true
-        Rails.logger.info("[Mtf] loop start #{symbols.join(', ')} @#{timeframe}")
-
-        Bars::FetchLoop.start(timeframe: timeframe, symbols: symbols) do |symbol, _series|
-          break unless @running
-
-          begin
-            inst = Instrument.segment_index.find_by(symbol_name: symbol) || Instrument.segment_equity.find_by(display_name: symbol)
-            next unless inst
-
-            sig = Strategy::MtfSmcEntry.call(inst)
-            next unless sig
-
-            # pick option leg
-            leg = Strategy::OptionLocator.new(symbol).atm_leg_for(sig.direction == :bullish ? :bullish : :bearish)
-
-            # sizing (use your existing sizing module)
-            budget = Scalp::Budget.current || Scalp::Budget.new(ScalpSession.today!)
-            sizing = Scalp::Sizing.for(leg, budget: budget)
-
-            next if sizing.qty <= 0 || !budget.can_trade?
-
-            # # place order
-            # intent = Execution::DhanRouter.place_super_order!(leg, sizing)
-
-            # # subscribe ticks for exit/trailing
-            # Live::WsHub.instance.subscribe(seg: leg.exchange_segment, sid: leg.security_id)
-
-            # # register with guard
-            # Execution::PositionGuard.instance.register(
-            #   pos_id: nil, # if you persist immediately, pass id
-            #   exchange_segment: leg.exchange_segment,
-            #   security_id: leg.security_id,
-            #   entry: intent.entry_price,
-            #   qty: sizing.qty,
-            #   sl_pct: sizing.sl_pct, tp_pct: sizing.tp_pct, trail_pct: sizing.trail_pct,
-            #   placed_as: 'super', super_order_id: intent.broker_order_id
-            # )
-
-            Rails.logger.info("[Mtf] #{symbol} #{sig.direction.upcase} -> leg=#{leg.security_id} why=#{sig.why}")
-          rescue StandardError => e
-            Rails.logger.error("[Mtf] fail #{symbol}: #{e.class} #{e.message}")
-            Rails.logger.error(
-              "[MTF] fail #{symbol}: #{e.class} #{e.message}\n" \
-              "#{(e.backtrace || [])[0, 8].join("\n")}"
-            )
-          end
-        end
-      end
-
-      def stop
-        @running = false
-        Bars::FetchLoop.stop
-      end
     end
   end
 end
@@ -4456,7 +3877,7 @@ end
 # app/services/runner/recent_signals.rb
 module Runner
   class RecentSignals
-    KEY = 'recent_signals'
+    KEY = 'recent_signals'.freeze
 
     # store a short-lived fingerprint per underlying (e.g., 30s)
     def self.seen?(underlying_id:, fingerprint:, ttl: 30)
@@ -4468,556 +3889,6 @@ module Runner
   end
 end
 
-
-# File: app/services/runner/strategy_loop.rb
-# app/services/runner/strategy_loop.rb (inside eval_instrument, before placing order)
-cs5  = CandleSeries.for(ins, '5m')
-cs15 = CandleSeries.for(ins, '15m')
-
-scalp_mode = Regime::ChopDetector.choppy_pre_entry?(cs5, cs15)
-
-entry_premium = opt[:ltp].to_f
-risk_params   = Risk::ScalpParams.for(
-  entry_premium: entry_premium,
-  mode: scalp_mode ? :scalp : :momentum
-)
-
-Orders::Executor.call(
-  instrument: Instrument.find_by(security_id: opt[:security_id]),
-  side: :buy,
-  qty: qty,
-  entry_type: :market,
-  risk_params: risk_params,
-  client_ref: "super:#{ins.id}:#{Time.now.to_i}:#{SecureRandom.hex(3)}"
-)
-
-# app/services/runner/strategy_loop.rb
-module Runner
-  class StrategyLoop
-    TICK      = 0.25 # seconds between scans
-    TZ        = 'Asia/Kolkata'
-
-    def initialize(instruments:)
-      @instruments = Array(instruments)
-      @risk        = Risk::Guard.new
-      @running     = false
-    end
-
-    def start
-      return if @running
-
-      @running = true
-      @thread = Thread.new { run! }
-      @thread
-    end
-
-    def stop
-      @running = false
-      @thread&.join(1)
-    end
-
-    private
-
-    def run!
-      Thread.current.name = begin
-        'StrategyLoop'
-      rescue StandardError
-        nil
-      end
-      loop do
-        break unless @running
-
-        begin
-          break unless @risk.trading_enabled?
-          next unless within_trade_window?
-
-          @instruments.each do |ul|
-            eval_underlying(ul)
-          end
-        rescue StandardError => e
-          Rails.logger.error("[StrategyLoop] #{e.class} #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}")
-        ensure
-          sleep TICK
-        end
-      end
-      Rails.logger.info('[StrategyLoop] stopped')
-    end
-
-    def within_trade_window?
-      Time.use_zone(TZ) do
-        now  = Time.zone.now
-        wnd1 = now.change(hour: 9,  min: 20)..now.change(hour: 11, min: 15)
-        wnd2 = now.change(hour: 13, min: 30)..now.change(hour: 15, min: 5)
-        wnd1.cover?(now) || wnd2.cover?(now)
-      end
-    end
-
-    def eval_underlying(ul)
-      # staleness gate (on underlying symbol/index)
-      if @risk.stale?(seg: ul.exchange_segment, sid: ul.security_id)
-        Rails.logger.debug { "[StrategyLoop] stale ticks for #{ul.symbol}, skipping" }
-        return
-      end
-
-      # strategy compute on last closed bar (1m)
-      cs1  = CandleSeries.for(ul, '1m')
-      bar  = cs1.last_bar
-      strat = Strategy::Router.for(ul)
-      strat.on_bar(bar: bar)
-
-      sig = strat.entry_signal
-      return unless sig # no entry
-
-      # trade budget gate + daily-loss gate
-      ok, reason = @risk.entry_allowed?(
-        expected_risk_rupees: @risk.per_trade_risk_rupees,
-        seg: ul.exchange_segment, sid: ul.security_id
-      )
-      unless ok
-        Rails.logger.info("[ENTRY-BLOCKED] #{ul.symbol} reason=#{reason}")
-        return
-      end
-
-      # ensure at most one order per signal fingerprint (15m ST state + side)
-      fp = signal_fingerprint(ul: ul, sig: sig)
-      if Runner::RecentSignals.seen?(underlying_id: ul.id, fingerprint: fp, ttl: 30)
-        Rails.logger.debug { "[StrategyLoop] duplicate signal suppressed #{ul.symbol} fp=#{fp}" }
-        return
-      end
-
-      # choose CE/PE strike (ATM±1 with filters)
-      cp  = (sig.side == :buy_ce ? :ce : :pe)
-      opt = Options::ChainAnalyzer.call(underlying: ul, side: cp)
-      unless opt
-        Rails.logger.info("[StrategyLoop] no viable option for #{ul.symbol} side=#{cp}")
-        return
-      end
-
-      # size by rupees risk
-      qty = Sizing.qty_for_rupees_risk(
-        premium: opt[:ltp].to_f,
-        lot_size: opt[:lot_size].to_i,
-        sl_pct: 0.25,
-        per_trade_rupees: @risk.per_trade_risk_rupees
-      )
-      if qty <= 0
-        Rails.logger.info("[StrategyLoop] qty=0 for #{ul.symbol} (risk too small vs lot)")
-        return
-      end
-
-      # scalp vs momentum risk params
-      cs5  = CandleSeries.for(ul, '5m')
-      cs15 = CandleSeries.for(ul, '15m')
-      scalp_mode = Regime::ChopDetector.choppy_pre_entry?(cs5, cs15)
-      entry_premium = opt[:ltp].to_f
-      risk_params = Risk::ScalpParams.for(entry_premium: entry_premium, mode: (scalp_mode ? :scalp : :momentum))
-
-      # final send (market entry by default)
-      client_ref = "super:#{ul.id}:#{Time.now.to_i}:#{SecureRandom.hex(3)}"
-      Orders::Executor.call(
-        instrument: Instrument.find_by(security_id: opt[:security_id]),
-        side: :buy,
-        qty: qty,
-        entry_type: :market, # or :limit with entry_price rounded to 0.05
-        risk_params: risk_params,
-        client_ref: client_ref
-      )
-
-      Rails.logger.info("[ENTRY] #{ul.symbol} #{sig.side} scalp=#{scalp_mode} ltp=#{entry_premium} qty=#{qty} ref=#{client_ref}")
-    end
-
-    def signal_fingerprint(ul:, sig:)
-      # keep it simple, include side + minute timestamp
-      t = Time.now.utc.strftime('%Y%m%d%H%M')
-      "#{ul.id}:#{sig.side}:#{t}"
-    end
-  end
-end
-
-
-# File: app/services/scalp/budget.rb
-module Scalp
-  class Budget
-    def initialize(session)
-      @session = session
-      @allow_entries = true
-      @mutex = Mutex.new
-    end
-
-    def on_trade_closed!(realized_pnl:)
-      @mutex.synchronize do
-        @session.increment!(:realized_pnl, realized_pnl)
-      end
-    end
-
-    def can_trade?
-      @allow_entries && !daily_loss_hit?
-    end
-
-    def block_new_entries!
-      @allow_entries = false
-    end
-
-    def daily_loss_hit?
-      @session.realized_pnl <= -@session.max_day_loss
-    end
-
-    def risk_rupees
-      BigDecimal(@session.params['risk_rupees'].to_s.presence || '600.0')
-    end
-
-    def profit_trigger_rupees
-      BigDecimal(@session.params['profit_trigger_rupees'].to_s.presence || '1000.0')
-    end
-
-    def no_entries_after # "15:00" default
-      (@session.params['no_entries_after'] || '15:00').to_s
-    end
-
-    def roster
-      Array(@session.params['roster']).presence || %w[NIFTY BANKNIFTY]
-    end
-  end
-end
-
-# File: app/services/scalp/close_strikes_manager.rb
-module Scalp
-  class CloseStrikesManager
-    class << self
-      def start(roster)
-        @mutex ||= Mutex.new
-        @started = true
-        @subscribed = Set.new # holds "SEGMENT:SECURITY_ID" keys
-        @roster = Array(roster)
-
-        # subscribe underlyings up front (indices/stocks)
-        @roster.each { |symbol| subscribe_underlying!(symbol) }
-      rescue StandardError => e
-        Rails.logger.error("[CloseStrikesManager] start failed: #{e.class}: #{e.message}")
-      end
-
-      def stop
-        @started = false
-        # Optional: perform a bulk UNSUB here if you want to clean everything
-        # unsubscribe_all!
-      rescue StandardError => e
-        Rails.logger.error("[CloseStrikesManager] stop failed: #{e.class}: #{e.message}")
-      end
-
-      # Subscribe option legs for a given symbol (e.g., ATM ± 1)
-      # Pass an array of [segment, security_id] pairs or Derivative records.
-      def subscribe_legs!(legs)
-        return unless @started
-
-        pairs = normalize_pairs(legs)
-        with_client do |client|
-          to_add = filter_new(pairs)
-          chunked(to_add, 90).each do |batch|
-            client.subscribe_many(:quote, batch) # or :full if you want depth/OI
-            mark_subscribed(batch)
-          rescue StandardError => e
-            Rails.logger.warn("[CloseStrikesManager] subscribe_many failed: #{e.class}: #{e.message}")
-          end
-        end
-      end
-
-      # Called by PositionGuard after exit; real impl can ref-count and UNSUB.
-      def unsubscribe_if_unused(segment, security_id)
-        # Optional: track refs per leg and UNSUB when count goes zero.
-        # For now, we keep them subscribed; DhanHQ allows <=100 per frame and
-        # we aim to stay within that via focused ATM±1 usage.
-        true
-      end
-
-      # Convenience for subscribing a single leg (Derivative or [seg, id])
-      def subscribe_leg!(leg)
-        subscribe_legs!([leg])
-      end
-
-      private
-
-      # Subscribe the underlying itself so we can watch spot drift if desired
-      def subscribe_underlying!(symbol)
-        inst = Instrument.find_by(symbol: symbol) || Instrument.find_by(tradingsymbol: symbol)
-        return unless inst
-
-        segment = inst.exchange_segment # e.g., "NSE_FNO" for index futures; adjust per your mapping
-        sec_id  = inst.security_id
-        return unless segment.present? && sec_id.present?
-
-        subscribe_legs!([[segment, sec_id]])
-      end
-
-      def with_client
-        # Try to get the running WS client from your supervisor or directly:
-        client = (WSSupervisor.respond_to?(:client) && WSSupervisor.client) ||
-                 (defined?(DhanHQ::WS::Client) && DhanHQ::WS::Client.try(:current)) ||
-                 (defined?(DhanHQ::WS::Client) && DhanHQ::WS::Client.try(:instance))
-
-        unless client
-          Rails.logger.warn('[CloseStrikesManager] WS client not available yet')
-          return
-        end
-        yield client
-      end
-
-      def normalize_pairs(legs)
-        legs.filter_map do |leg|
-          case leg
-          when Array
-            seg, id = leg
-            next unless seg && id
-
-            [seg.to_s, id.to_i]
-          else
-            # treat as Derivative or a PORO responding to segment/security_id
-            seg = leg.respond_to?(:exchange_segment) ? leg.exchange_segment : leg.segment
-            id  = leg.respond_to?(:security_id) ? leg.security_id : leg.id
-            next unless seg && id
-
-            [seg.to_s, id.to_i]
-          end
-        end
-      end
-
-      def filter_new(pairs)
-        @mutex.synchronize do
-          pairs.reject { |seg, id| @subscribed.include?("#{seg}:#{id}") }
-        end
-      end
-
-      def mark_subscribed(pairs)
-        @mutex.synchronize do
-          pairs.each { |seg, id| @subscribed.add("#{seg}:#{id}") }
-        end
-      end
-
-      def chunked(arr, size)
-        arr.each_slice(size).to_a
-      end
-
-      # If you later implement hard UNSUB:
-      # def unsubscribe_all!
-      #   with_client do |client|
-      #     keys = @mutex.synchronize { @subscribed.to_a }
-      #     pairs = keys.map { |k| seg, id = k.split(":"); [seg, id.to_i] }
-      #     chunked(pairs, 90).each { |batch| client.unsubscribe_many(:quote, batch) }
-      #   end
-      #   @mutex.synchronize { @subscribed.clear }
-      # end
-    end
-  end
-end
-
-# File: app/services/scalp/control.rb
-module Scalp
-  class Control
-    def self.kill_today!(reason: 'manual')
-      session = ScalpSession.find_by(trade_date: Date.current)
-      session&.update!(status: :killed, params: session.params.merge(kill_reason: reason))
-    end
-
-    def self.stop_today!
-      session = ScalpSession.find_by(trade_date: Date.current)
-      session&.update!(status: :stopped)
-    end
-  end
-end
-
-# File: app/services/scalp/roster.rb
-module Scalp
-  class Roster
-    def self.list(session)
-      Array(session.params['roster']).presence || %w[NIFTY BANKNIFTY]
-    end
-  end
-end
-
-# File: app/services/scalp/rules.rb
-module Scalp
-  class Rules
-    # candles => your CandleSeries for 1m
-    # Expect: supertrend(direction: :up|:down), rsi(14), adx(14)
-    def self.entry_signal(symbol, candles)
-      st  = candles.supertrend(factor: 2.0, period: 10)
-      rsi = candles.rsi(14).last
-      adx = candles.adx(14).last
-      dir = st.direction # :up or :down at last bar
-
-      return nil unless adx && adx > 25
-
-      if dir == :up && rsi && rsi > 50
-        OpenStruct.new(direction: :bullish)
-      elsif dir == :down && rsi && rsi < 50
-        OpenStruct.new(direction: :bearish)
-      end
-    end
-  end
-end
-
-# File: app/services/scalp/runner.rb
-module Scalp
-  class Runner < ApplicationService
-    def initialize(session:)
-      @session = session
-      @running = true
-    end
-
-    def call
-      @session.update!(status: :running, equity_peak: @session.equity)
-      boot!
-
-      loop do
-        break unless @running
-
-        enforce_time_window!
-        enforce_kill_switch!
-        sleep 1
-      end
-    ensure
-      shutdown!
-    end
-
-    def stop!
-      @running = false
-    end
-
-    private
-
-    def boot!
-      @budget = Budget.new(@session)
-
-      Scalp::WSSupervisor.start(mode: :quote)
-      CloseStrikesManager.start(Scalp::Roster.list(@session))
-      Execution::PositionGuard.start(@budget)
-
-      # 1-minute entries across roster
-      Bars::FetchLoop.start(timeframe: '1m', symbols: Scalp::Roster.list(@session)) do |symbol, candles|
-        next unless in_entry_window? && @budget.can_trade?
-
-        signal = Rules.entry_signal(symbol, candles)
-        next unless signal
-
-        leg   = Strategy::OptionLocator.new(symbol).atm_leg_for(signal.direction) # CE for :bullish, PE for :bearish
-        entry = Scalp::Sizing.for(leg, budget: @budget)
-        next if entry.qty <= 0
-
-        intent = Execution::DhanRouter.place_super_order!(leg, entry) # super order or fallback path
-        Execution::PositionGuard.register_intent(intent)
-        @session.increment!(:trades_count)
-      end
-    end
-
-    def in_entry_window?
-      now = Time.current.in_time_zone('Asia/Kolkata')
-      cutoff = @budget.no_entries_after
-      now < now.change(hour: cutoff.split(':')[0].to_i, min: cutoff.split(':')[1].to_i)
-    end
-
-    def enforce_time_window!
-      now = Time.current.in_time_zone('Asia/Kolkata')
-      return unless now >= now.change(hour: 15, min: 25)
-
-      stop!
-    end
-
-    def enforce_kill_switch!
-      @session.reload
-      @session.update!(equity_peak: [@session.equity_peak, @session.equity].max)
-      stop! if @budget.daily_loss_hit?
-    end
-
-    def shutdown!
-      Execution::PositionGuard.stop
-      CloseStrikesManager.stop
-      WSSupervisor.stop
-      Bars::FetchLoop.stop
-      @session.update!(status: :stopped) if @session.running?
-    end
-  end
-end
-
-# File: app/services/scalp/sizing.rb
-module Scalp
-  class Sizing
-    # derivative must respond to lot_size and ltp
-    def self.for(derivative, budget:, sl_pct: BigDecimal('0.10'))
-      lot_size    = derivative.lot_size.to_i
-      entry_price = BigDecimal(derivative.ltp.to_s)
-      risk        = budget.risk_rupees
-
-      return OpenStruct.new(qty: 0, sl_pct: sl_pct) if entry_price <= 0 || lot_size <= 0
-
-      lots = (risk / (entry_price * sl_pct * lot_size)).floor
-      qty  = [lots, 1].max * lot_size
-      OpenStruct.new(qty: qty, sl_pct: sl_pct)
-    end
-  end
-end
-
-# File: app/services/scalp/ws_supervisor.rb
-# frozen_string_literal: true
-
-module Scalp
-  class WSSupervisor
-    def initialize(indices:, mode: :quote)
-      @mode = mode
-      @indices = indices
-      @bus = TickBus.new
-      @agg = CandleAggregator.new(interval_sec: 300) { |ev| on_candle_close(ev) }
-      @running = Concurrent::AtomicBoolean.new(false)
-    end
-    attr_reader :agg
-
-    def start!
-      return if @running.true?
-
-      @running.make_true
-
-      # seed 5m series for indices (from your Instrument helpers)
-      @indices.each do |it|
-        inst = Instrument.find_by(security_id: it[:security_id].to_s)
-        next unless inst
-
-        cs = inst.candle_series(interval: '5') || CandleSeries.new(symbol: inst.symbol, interval: '5')
-        @agg.seed_series!(segment: it[:segment], security_id: it[:security_id], series: cs)
-      end
-
-      @ws = DhanHQ::WS::Client.new(mode: @mode).start
-      @ws.on(:tick) { |t| on_tick(t) }
-      @indices.each { |i| @ws.subscribe_one(segment: i[:segment], security_id: i[:security_id]) }
-
-      @drainer = Thread.new do
-        loop do
-          @bus.drain
-          sleep 0.01 if @running.true?
-        end
-      end
-      self
-    end
-
-    def stop!
-      @running.make_false
-      @ws&.stop
-      @drainer&.kill
-    end
-
-    def subscribe_option(seg:, sid:) = @ws.subscribe_one(segment: seg, security_id: sid)
-
-    private
-
-    def on_tick(t)
-      TickCache.put(t)
-      @bus.publish("ticks.#{t[:segment]}.#{t[:security_id]}", t)
-      @agg.on_tick(t)
-      CloseStrikesManager.instance.on_index_tick(t) # dynamic close strikes
-    end
-
-    def on_candle_close(ev)
-      Strategy::SupertrendOptionLong.instance.on_index_candle(ev[:segment], ev[:security_id])
-    end
-  end
-end
 
 # File: app/services/sizing.rb
 # app/services/sizing.rb
@@ -5032,854 +3903,6 @@ module Sizing
 
     lots = (per_trade_rupees.to_i / per_lot_risk).floor
     [lots, 1].max * lot_size.to_i
-  end
-end
-
-
-# File: app/services/smc/bos.rb
-# SMC Component: Break of Structure (BOS)
-module Smc
-  class Bos < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      index = candles.size - 2
-      return false if index < 4
-
-      # Detect BOS: Higher High followed by higher low (bullish) or Lower Low + Lower High (bearish)
-      last_high = candles[index].high
-      prev_high = candles[index - 2].high
-      last_low  = candles[index].low
-      prev_low  = candles[index - 2].low
-
-      bullish_bos = last_high > prev_high && candles[index + 1].low > prev_low
-      bearish_bos = last_low < prev_low && candles[index + 1].high < prev_high
-
-      bullish_bos || bearish_bos
-    end
-
-    private
-
-    attr_reader :series, :candles
-  end
-end
-
-
-# File: app/services/smc/choch.rb
-# SMC Component: Change of Character (CHOCH)
-module Smc
-  class Choch < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      return false if candles.size < 10
-
-      recent = candles.last(5)
-      prev = candles.last(10)[0...5]
-
-      bullish_choch = recent.first.low > prev.map(&:low).max && recent.last.close > recent.first.open
-      bearish_choch = recent.first.high < prev.map(&:high).min && recent.last.close < recent.first.open
-
-      bullish_choch || bearish_choch
-    end
-
-    private
-
-    attr_reader :series, :candles
-  end
-end
-
-# File: app/services/smc/fair_value_gap.rb
-# frozen_string_literal: true
-
-module Smc
-  class FairValueGap < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      return false if candles.size < 3
-
-      # Use last 3 candles
-      c1, c2, c3 = candles[-3..]
-
-      bullish_gap = c3.low > c1.high
-      bearish_gap = c3.high < c1.low
-
-      bullish_gap || bearish_gap
-    end
-
-    private
-
-    attr_reader :series, :candles
-  end
-end
-
-# File: app/services/smc/inducement.rb
-# frozen_string_literal: true
-
-module Smc
-  class Inducement < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      return false if candles.size < 20
-
-      lookback = 15
-      current = candles.last
-      past = candles.last(lookback + 1)[0...lookback]
-
-      inducement_up = false
-      inducement_down = false
-
-      # False breakout above previous highs (trap long buyers)
-      highest_past_high = past.map(&:high).max
-      inducement_up = true if current.high > highest_past_high && current.close < highest_past_high && current.bearish?
-
-      # False breakdown below previous lows (trap short sellers)
-      lowest_past_low = past.map(&:low).min
-      inducement_down = true if current.low < lowest_past_low && current.close > lowest_past_low && current.bullish?
-
-      inducement_up || inducement_down
-    rescue StandardError => e
-      Rails.logger.error("SMC::Inducement error: #{e.message}")
-      false
-    end
-
-    private
-
-    attr_reader :series, :candles
-  end
-end
-
-
-# File: app/services/smc/interpreter.rb
-module SMC
-  class Interpreter < ApplicationService
-    def initialize(analysis_hash)
-      @analysis = analysis_hash
-    end
-
-    def call
-      client = OpenAI::Client.new(...)
-      prompt = build_prompt
-      response = client.chat(... prompt ...)
-      JSON.parse(response.dig("choices", 0, "message", "content"))
-    end
-
-    def build_prompt
-      openai_prompt_for_smc(@analysis)
-    end
-  end
-end
-
-
-# File: app/services/smc/mitigation.rb
-# frozen_string_literal: true
-
-module Smc
-  class Mitigation < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      return false if candles.size < 20
-
-      # Reuse previously defined Order Blocks
-      order_blocks = Smc::OrderBlock.call(series: series)
-      return false if order_blocks.blank?
-
-      # Pick the last known OB zone
-      ob = order_blocks.last
-      return false unless ob[:index] && ob[:type] && ob[:range]
-
-      # Only consider mitigation attempts that come after 3 candles from OB
-      mitigation_index = ob[:index] + 3
-      return false if candles.size <= mitigation_index
-
-      # Look for price touching or reacting from OB zone in later candles
-      candles[mitigation_index..].each do |candle|
-        if ob[:type] == :bullish
-          return true if candle.low <= ob[:range][:low] && candle.close > ob[:range][:low]
-        elsif ob[:type] == :bearish
-          return true if candle.high >= ob[:range][:high] && candle.close < ob[:range][:high]
-        end
-      end
-
-      false
-    rescue StandardError => e
-      Rails.logger.error("Mitigation check failed: #{e.message}")
-      false
-    end
-
-    private
-
-    attr_reader :series, :candles
-  end
-end
-
-# File: app/services/smc/order_block.rb
-# frozen_string_literal: true
-
-module Smc
-  class OrderBlock < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-    end
-
-    def call
-      return false if candles.size < 10
-
-      last_index = candles.size - 1
-      lookback = 10
-
-      (last_index - lookback).upto(last_index - 2) do |i|
-        curr = candles[i]
-        nxt  = candles[i + 1]
-
-        # Bullish Order Block: Last bearish candle before strong bullish candle
-        return true if curr.bearish? && nxt.bullish? && nxt.close > nxt.open + series.atr && price_respected_order_block?(curr.low, :bullish)
-
-        # Bearish Order Block: Last bullish candle before strong bearish candle
-        return true if curr.bullish? && nxt.bearish? && nxt.close < nxt.open - series.atr && price_respected_order_block?(curr.high, :bearish)
-      end
-
-      false
-    end
-
-    private
-
-    attr_reader :series, :candles
-
-    def price_respected_order_block?(level, direction)
-      last = candles.last
-      if direction == :bullish
-        last.low >= level
-      else
-        last.high <= level
-      end
-    end
-  end
-end
-
-
-# File: app/services/strategies/base_indicator_strategy.rb
-module Strategies
-  class BaseIndicatorStrategy
-    attr_reader :instrument, :series, :interval
-
-    def initialize(instrument, series: nil)
-      @instrument = instrument
-      @series = series || instrument.candles('5')
-    end
-
-    def initialize(instrument, series: nil, interval: '5')
-      @instrument = instrument
-      @interval = interval
-      @series = series || instrument.candles(interval)
-    end
-
-    def series
-      @series ||= instrument.candles(interval)
-    end
-
-    def candles
-      @candles ||= series.candles
-    end
-
-    def closes
-      @closes ||= candles.map(&:close)
-    end
-
-    def highs
-      @highs ||= candles.map(&:high)
-    end
-
-    def lows
-      @lows ||= candles.map(&:low)
-    end
-
-    def opens
-      @opens ||= candles.map(&:open)
-    end
-
-    def volumes
-      @volumes ||= candles.map(&:volume)
-    end
-
-    def last_candle
-      @last_candle ||= candles.last
-    end
-
-    def signal?
-      raise NotImplementedError, "#{self.class.name} must implement #signal?"
-    end
-
-    def signal_details
-      result = signal?
-      return nil unless result
-
-      {
-        signal: result,
-        confidence: confidence_score,
-        reason: reason_text
-      }
-    end
-  end
-end
-
-# File: app/services/strategies/basic_trend_strategy.rb
-module Strategies
-  class BasicTrendStrategy < ApplicationService
-    def initialize(instrument)
-      @instrument = instrument
-      raw_data = instrument.intraday_ohlc(interval: '5')
-      @series = CandleSeries.new(symbol: instrument.symbol_name)
-      @series.load_from_raw(raw_data)
-    end
-
-    def call
-      calc = Indicators::Calculator.new(@series)
-      if calc.bullish_signal?
-        :buy_ce
-      elsif calc.bearish_signal?
-        :buy_pe
-      else
-        :hold
-      end
-    end
-  end
-end
-
-# File: app/services/strategies/bollinger_rsi.rb
-module Strategies
-  class BollingerRsi < BaseIndicatorStrategy
-    def signal?
-      rsi = instrument.rsi
-      close = instrument.candles.closes.last
-      bands = instrument.bollinger_bands
-
-      pp "RSI: #{rsi}, Close: #{close}, Bands: #{bands.inspect}"
-      return :buy_ce if close > bands[:upper] && rsi < 70
-
-      :buy_pe if close < bands[:lower] && rsi > 30
-    end
-
-    def confidence_score = 65
-    def reason_text = "BB/RSI: Close=#{series.closes.last}, RSI=#{series.rsi}, Bands=#{series.bollinger_bands.inspect}"
-  end
-end
-
-
-
-# File: app/services/strategies/donchian_adx.rb
-module Strategies
-  class DonchianAdx < BaseIndicatorStrategy
-    def signal?
-      close = instrument.candles.closes.last
-      donchians = instrument.donchian_channel
-      adx = instrument.adx
-
-      return :buy_ce if close > donchians.first.upper_bound && adx > 25
-
-      :buy_pe if close < donchians.first.lower_bound && adx > 25
-    end
-
-    def confidence_score = 70
-    def reason_text = "Donchian/ADX: Close=#{instrument.candles.closes.last}, Donchian=#{instrument.donchian_channel.first.inspect}, ADX=#{instrument.adx}"
-  end
-end
-
-
-
-# File: app/services/strategies/holy_grail_strategy.rb
-# frozen_string_literal: true
-
-module Strategies
-  class HolyGrailStrategy < BaseIndicatorStrategy
-    STRATEGIES = {
-      rsi_adx: Strategies::RsiAdxCombo,
-      macd_supertrend: Strategies::MacdSupertrend,
-      bollinger_rsi: Strategies::BollingerRsi,
-      donchian_adx: Strategies::DonchianAdx
-      # vwap_rsi: Strategies::VwapRsi,
-      # obv_macd: Strategies::ObvMacd
-    }.freeze
-
-    STRATEGY_WEIGHTS = {
-      rsi_adx: 0.15,
-      macd_supertrend: 0.2,
-      bollinger_rsi: 0.15,
-      donchian_adx: 0.15
-      # vwap_rsi: 0.15,
-      # obv_macd: 0.2
-    }.freeze
-
-    def initialize(instrument, series: nil)
-      @instrument = instrument
-      @series = series || instrument.candles('5')
-    end
-
-    def call
-      results = run_all_strategies
-
-      top_signal = results[:votes].max_by { |_signal, w| w }&.first || :hold
-      final_score = results[:score]
-
-      {
-        strategy: :holygrail,
-        instrument: instrument.symbol_name,
-        action: top_signal,
-        confidence: final_score.round(2),
-        reasons: results[:reasons],
-        telemetry: results[:telemetry],
-        decision: final_score >= 0.65 ? top_signal : :hold
-      }
-    end
-
-    # ✨ AI Prompt Payload: use this output to pass to OpenAI
-    def ai_prompt_payload
-      result = call
-      <<~PROMPT.strip
-        Instrument: #{result[:instrument]}
-        Final Action: #{result[:action].to_s.upcase}
-        Confidence Score: #{result[:confidence]}%
-        Decision Reasoning:
-        #{result[:reasons].map { |r| "- #{r}" }.join("\n")}
-
-        Indicator Telemetry:
-        #{result[:telemetry].map { |k, v| "#{k.to_s.titleize}: #{v}" }.join("\n")}
-
-        Based on the above, analyze the current market structure, probable support/resistance zones, and possible close for today. If market is closed, prepare analysis for next session. Suggest any CE/PE trade or HOLD decision with SL/TP levels.
-      PROMPT
-    end
-
-    private
-
-    attr_reader :instrument, :series
-
-    def run_all_strategies
-      results = {
-        score: 0.0,
-        votes: Hash.new(0),
-        reasons: [],
-        telemetry: {}
-      }
-
-      STRATEGIES.each do |key, klass|
-        strat = klass.new(instrument, series: series)
-        outcome = strat.signal_details
-
-        next unless outcome
-
-        weight = STRATEGY_WEIGHTS[key]
-        results[:votes][outcome[:signal]] += weight
-        results[:score] += outcome[:confidence] * weight
-        results[:reasons] << "#{key.to_s.titleize} → #{outcome[:signal].to_s.upcase} (#{(outcome[:confidence] * weight).round(1)} pts)"
-        results[:telemetry][key] = outcome[:reason]
-      end
-
-      results
-    end
-  end
-end
-
-# File: app/services/strategies/liquidity_grab_strategy.rb
-module Strategies
-  class LiquidityGrabStrategy < ApplicationService
-    def initialize(instrument)
-      @instrument = instrument
-      raw = instrument.intraday_ohlc(interval: '5')
-      @series = CandleSeries.new(symbol: instrument.symbol_name)
-      @series.load_from_raw(raw)
-    end
-
-    def signal?
-      grab_up = @series.liquidity_grab_up?
-      grab_down = @series.liquidity_grab_down?
-
-      return :short if grab_up
-      return :long  if grab_down
-
-      false
-    end
-  end
-end
-
-# File: app/services/strategies/macd_supertrend.rb
-module Strategies
-  class MacdSupertrend < BaseIndicatorStrategy
-    def signal?
-      macd = instrument.macd
-      supertrend = instrument.supertrend_signal
-
-      macd_line = macd[:macd]
-      signal_line = macd[:signal]
-
-      if macd_line > signal_line && supertrend == :long_entry
-        :buy_ce
-      elsif macd_line < signal_line && supertrend == :short_entry
-        :buy_pe
-      end
-    end
-
-    def confidence_score = 75
-    def reason_text = "MACD/ST: MACD=#{instrument.macd[:macd]}, Signal=#{instrument.macd[:signal]}, Supertrend=#{instrument.supertrend_signal}"
-  end
-end
-
-
-
-# File: app/services/strategies/obv_macd.rb
-module Strategies
-  class ObvMacd < BaseIndicatorStrategy
-    def signal?
-      obv = series.obv
-      macd = series.macd
-      macd_line = macd.last[:macd]
-      signal_line = macd.last[:signal]
-
-      return :buy_ce if obv_trending_up?(obv) && macd_line > signal_line
-
-      :buy_pe if obv_trending_down?(obv) && macd_line < signal_line
-    end
-
-    def obv_trending_up?(obv)
-      obv.last(3).each_cons(2).all? { |a, b| b > a }
-    end
-
-    def obv_trending_down?(obv)
-      obv.last(3).each_cons(2).all? { |a, b| b < a }
-    end
-
-    def confidence_score = 70
-    def reason_text = "OBV/MACD: OBV trend detected, MACD=#{series.macd.last[:macd]}, Signal=#{series.macd.last[:signal]}"
-  end
-end
-
-
-# File: app/services/strategies/price_action_strategy.rb
-module Strategies
-  class PriceActionStrategy < ApplicationService
-    def initialize(instrument, interval: '5')
-      @instrument = instrument
-      @interval = interval
-      @series = CandleSeries.new(symbol: instrument.symbol_name, interval:)
-      raw = instrument.intraday_ohlc(interval: interval)
-      @series.load_from_raw(raw)
-    end
-
-    def signal?
-      # basic setup
-      @last = @series.candles.last
-      @prev = @series.candles[-2]
-      @third = @series.candles[-3]
-
-      bullish_pinbar? || bearish_engulfing? || breakout_candle?
-    end
-
-    private
-
-    def bullish_pinbar?
-      body = (@last.close - @last.open).abs
-      lower_wick = @last.open - @last.low if @last.bullish?
-      lower_wick = @last.close - @last.low if @last.bearish?
-
-      lower_wick && lower_wick > body * 2 && @last.close > @last.open
-    end
-
-    def bearish_engulfing?
-      @prev.bullish? &&
-        @last.bearish? &&
-        @last.open > @prev.close &&
-        @last.close < @prev.open
-    end
-
-    def breakout_candle?
-      highs = @series.candles[-5..-2].map(&:high)
-      @last.high > highs.max && @last.close > highs.max
-    end
-  end
-end
-
-# File: app/services/strategies/rsi_adx_combo.rb
-module Strategies
-  class RsiAdxCombo < BaseIndicatorStrategy
-    def signal?
-      rsi = instrument.rsi
-      adx = instrument.adx
-
-      return :buy_ce if rsi > 30 && adx > 20
-
-      :buy_pe if rsi < 70 && adx > 20
-    end
-
-    def confidence_score = 70
-
-    def reason_text
-      "RSI/ADX Combo: RSI=#{instrument.rsi.round(2)}, ADX=#{instrument.adx.round(2)}"
-    end
-  end
-end
-
-
-
-# File: app/services/strategies/smart_money_strategy.rb
-module Strategies
-  class SmartMoneyStrategy
-    def initialize(instrument)
-      @instrument = instrument
-      raw = instrument.intraday_ohlc(interval: '5')
-      @series = CandleSeries.new(symbol: instrument.symbol_name)
-      @series.load_from_raw(raw)
-    end
-
-    def signal?
-      fvg     = Indicators::FairValueGap.new(@series).detect.last
-      blocks  = Indicators::OrderBlock.new(@series).bullish_order_blocks.last
-      bos     = Indicators::Structure.new(@series).break_of_structure.last
-
-      return false unless bos && fvg && blocks
-
-      # Apply filters (e.g., direction match)
-      bos[:direction] == :up && blocks[:low] > fvg[:from]
-    end
-
-    def analysis_result
-      {
-        symbol: @instrument.symbol_name,
-        interval: @series.interval,
-        structure: Indicators::Structure.new(@series).summary,
-        order_blocks: Indicators::OrderBlock.new(@series).summary,
-        fair_value_gaps: Indicators::FairValueGap.new(@series).summary,
-        current_price: @series.closes.last,
-        signal: signal? ? :long_entry : :hold
-      }
-    end
-  end
-end
-
-
-# File: app/services/strategies/smc_strategy.rb
-# frozen_string_literal: true
-
-module Strategies
-  class SmcStrategy < ApplicationService
-    def initialize(series:)
-      @series = series
-      @candles = series.candles
-      @score = 0
-      @reasons = []
-    end
-
-    def call
-      return hold_signal('Not enough candles') if candles.size < 50
-
-      # Run all Smc indicators
-      bos     = Smc::Bos.call(series: series)
-      choch   = Smc::Choch.call(series: series)
-      order_blocks = Smc::OrderBlock.call(series: series)
-      fvg     = Smc::FairValueGap.call(series: series)
-      mitg    = Smc::Mitigation.call(series: series)
-      induc   = Smc::Inducement.call(series: series)
-      grab_up = series.liquidity_grab_up?
-      grab_dn = series.liquidity_grab_down?
-
-      # Scoring
-      apply_score(:bos, bos)
-      apply_score(:choch, choch)
-      apply_score(:order_block, order_blocks)
-      apply_score(:fvg, fvg)
-      apply_score(:mitigation, mitg)
-      apply_score(:inducement, induc)
-      apply_score(:liquidity_grab_up, grab_up)
-      apply_score(:liquidity_grab_down, grab_dn)
-
-      confidence = score
-
-      if confidence >= 70 && (bos || choch)
-        action = if grab_up
-                   :buy_pe
-                 else
-                   grab_dn ? :buy_ce : :hold
-                 end
-        build_signal(action, confidence)
-      else
-        hold_signal("Low Smc confidence: #{confidence}%")
-      end
-    rescue StandardError => e
-      notify_failure(e, 'SmcStrategy')
-      hold_signal("Exception: #{e.message}")
-    end
-
-    private
-
-    attr_reader :series, :score, :reasons, :candles
-
-    def apply_score(name, result)
-      return unless result
-
-      weight = case name
-               when :bos then 20
-               when :choch then 15
-               when :order_block then 10
-               when :fvg then 10
-               when :mitigation then 10
-               when :inducement then 10
-               when :liquidity_grab_up, :liquidity_grab_down then 15
-               else 0
-               end
-
-      @score += weight
-      reasons << "#{name.to_s.titleize} = TRUE (+#{weight})"
-    end
-
-    def build_signal(action, confidence)
-      {
-        strategy: :Smc,
-        action: action,
-        confidence: confidence,
-        reasons: reasons,
-        stop_loss: derive_sl(action),
-        take_profit: derive_tp(action)
-      }
-    end
-
-    def derive_sl(action)
-      atr = Indicators::AtrBand.call(series: series)
-      last = series.last
-      action == :buy_ce ? last.low - atr : last.high + atr
-    end
-
-    def derive_tp(action)
-      atr = Indicators::AtrBand.call(series: series)
-      last = series.last
-      action == :buy_ce ? last.close + (3 * atr) : last.close - (3 * atr)
-    end
-
-    def hold_signal(reason)
-      {
-        strategy: :Smc,
-        action: :hold,
-        confidence: score,
-        reasons: reasons << reason
-      }
-    end
-  end
-end
-
-
-# File: app/services/strategies/vwap_rsi.rb
-module Strategies
-  class VwapRsi < BaseIndicatorStrategy
-    def signal?
-      close = instrument.candles.closes.last
-      vwap = instrument.vwap
-      rsi = instrument.rsi
-
-      return :buy_ce if close > vwap && rsi > 40
-
-      :buy_pe if close < vwap && rsi < 60
-    end
-
-    def confidence_score = 60
-    def reason_text = "VWAP/RSI: Close=#{series.closes.last}, VWAP=#{series.vwap}, RSI=#{series.rsi.last}"
-  end
-end
-
-
-
-# File: app/services/strategy/mtf_smc_entry.rb
-# frozen_string_literal: true
-
-module Strategy
-  class MtfSmcEntry
-    Result = Struct.new(:direction, :why, :meta, keyword_init: true) # direction: :bullish/:bearish
-
-    def self.call(instrument)
-      s = Mtf::SeriesLoader.load(instrument: instrument, base_interval: '5')
-      return nil unless s&.h4 && s.h1 && s.m15
-
-      # 4H: Direction / Key levels / S&D
-      bias = case Mtf::Structure.trend(s.h4, lookback: 8)
-             when :up   then :bullish
-             when :down then :bearish
-             else :none
-             end
-
-      Rails.logger.debug { "#{instrument.symbol_name}: #{bias}" }
-      return nil if bias == :none
-
-      # 1H: Trend + BOS or CHOCH near OB/Fvg/liquidity
-      h1_trend = Mtf::Structure.trend(s.h1, lookback: 6)
-      bos      = Mtf::Structure.bos(s.h1, dir: (bias == :bullish ? :up : :down))
-      choch    = Mtf::Structure.choch(s.h1, prior_dir: (bias == :bullish ? :down : :up))
-      ob_zone  = Mtf::OrderBlock.last_before_bos(s.h1, bos)
-      fvg_list = Mtf::Fvg.scan(s.h1, lookback: 40)
-      pools    = (bias == :bullish ? Mtf::Liquidity.equal_lows(s.h1) : Mtf::Liquidity.equal_highs(s.h1))
-
-      # Require context alignment: trend or BOS/CHOCH in bias direction
-      aligned = (h1_trend == (bias == :bullish ? :up : :down)) || bos || choch
-      return nil unless aligned
-
-      # 15m: Confirmation (BOS + pullback to OB/Fvg or reaction at liquidity)
-      m15_bos = Mtf::Structure.bos(s.m15, dir: (bias == :bullish ? :up : :down))
-      return nil unless m15_bos
-
-      last_price = s.m15.candles.last.close
-      confirm =
-        if ob_zone && Mtf::OrderBlock.price_touches?(ob_zone, last_price)
-          :ob_touch
-        elsif (gap = fvg_list.last) && Mtf::Fvg.price_in_gap?(gap, last_price)
-          :fvg_retrace
-        elsif (pool = pools.last) && ((bias == :bullish && last_price >= pool.level) || (bias == :bearish && last_price <= pool.level))
-          :liquidity_sweep
-        else
-          :bos_only
-        end
-
-      # Extra filter: Supertrend & ADX on 15m
-      st_sig = s.m15.supertrend_signal
-      strong = begin
-        ta = TechnicalAnalysis::Adx.calculate(s.m15.hlc, period: 14).first&.adx.to_f
-        ta >= 18
-      rescue StandardError
-        true
-      end
-      return nil unless strong &&
-                        ((bias == :bullish && st_sig == :long_entry) || (bias == :bearish && st_sig == :short_entry))
-
-      Result.new(
-        direction: (bias == :bullish ? :bullish : :bearish),
-        why: "4H=#{bias} 1H_trend=#{h1_trend} 15m=#{confirm}",
-        meta: { bos: !!bos, choch: !!choch, ob: !!ob_zone, fvg: fvg_list.any?, pools: pools.any? }
-      )
-    end
-  end
-end
-
-
-# File: app/services/strategy/router.rb
-# frozen_string_literal: true
-
-class Strategy::Router
-  def self.for(instrument)
-    # Feature flag or config lookup could live here
-    Strategies::SupertrendContinuation.new(instrument: instrument, tf: '5m')
   end
 end
 
@@ -5910,189 +3933,6 @@ class TelegramNotifier
     res
   rescue StandardError => e
     Rails.logger.error("Telegram #{method} error: #{e.message}")
-  end
-end
-
-
-# File: app/strategies/base_strategy.rb
-# frozen_string_literal: true
-
-class BaseStrategy
-  attr_reader :instrument, :tf, :settings
-
-  def initialize(instrument:, tf: '5m', settings: {})
-    @instrument = instrument
-    @tf = tf
-    @settings = settings
-    @last_signal_at = nil
-  end
-
-  # Called on every new bar close
-  def on_bar(bar:)
-    # override
-  end
-
-  # Return a SignalStruct or nil
-  def entry_signal
-    nil
-  end
-
-  # Return a SignalStruct or nil (given active position side)
-  def exit_signal(position_side:, entry_at:, ltp:)
-    nil
-  end
-
-  protected
-
-  def recent_signal_cooldown?(seconds:)
-    return false unless @last_signal_at
-
-    (Time.now - @last_signal_at) < seconds
-  end
-
-  def mark_signal!
-    @last_signal_at = Time.now
-  end
-end
-
-
-# File: app/strategies/signal.rb
-# frozen_string_literal: true
-
-SignalStruct = Struct.new(
-  :type,       # :entry or :exit
-  :side,       # :buy_ce / :buy_pe or :close
-  :reason,     # short string
-  :confidence, # 0.0..1.0
-  :context,    # hash of indicator values
-  keyword_init: true
-)
-
-
-# File: app/strategies/supertrend_continuation.rb
-# frozen_string_literal: true
-
-class Strategies::SupertrendContinuation < BaseStrategy
-  ADX_MIN = 18
-
-  def on_bar(bar:)
-    # compute and cache indicators for the latest bar snapshot
-    @cs1 = CandleSeries.for(instrument, '1m')
-    @cs5 = CandleSeries.for(instrument, '5m')
-    @cs15 = CandleSeries.for(instrument, '15m')
-
-    @st5  = @cs5.supertrend(len: 10, factor: 2.0)
-    @st15 = @cs15.supertrend(len: 10, factor: 2.0)
-    @adx5 = begin
-      @cs5.adx(14)
-    rescue StandardError
-      nil
-    end
-
-    @vwap5 = begin
-      vwap_for(@cs5)
-    rescue StandardError
-      nil
-    end
-    @close = bar[:close] || bar.close
-
-    @long_bias  = st_up?(@st5) && st_up?(@st15) && vwap_ok?(:long)
-    @short_bias = st_down?(@st5) && st_down?(@st15) && vwap_ok?(:short)
-  end
-
-  # ---------- ENTRY ----------
-  def entry_signal
-    return nil if recent_signal_cooldown?(seconds: 30) # avoid rapid refires
-    return nil unless (@adx5 || 0) >= ADX_MIN
-
-    if @long_bias
-      mark_signal!
-      return SignalStruct.new(
-        type: :entry, side: :buy_ce, reason: 'ST align + ADX + VWAP long',
-        confidence: conf_score(:long),
-        context: ctx
-      )
-    end
-
-    if @short_bias
-      mark_signal!
-      return SignalStruct.new(
-        type: :entry, side: :buy_pe, reason: 'ST align + ADX + VWAP short',
-        confidence: conf_score(:short),
-        context: ctx
-      )
-    end
-    nil
-  end
-
-  # ---------- EXIT ----------
-  # Basic exits for a runner already in market
-  def exit_signal(position_side:, entry_at:, ltp:)
-    # opposite ST flip (hard exit)
-    if position_side == :buy_ce && st_down?(@st5)
-      return SignalStruct.new(type: :exit, side: :close, reason: 'ST flip down', confidence: 1.0, context: ctx)
-    elsif position_side == :buy_pe && st_up?(@st5)
-      return SignalStruct.new(type: :exit, side: :close, reason: 'ST flip up', confidence: 1.0, context: ctx)
-    end
-
-    # VWAP loss + momentum fade (soft exit)
-    if position_side == :buy_ce && @vwap5 && @close < @vwap5 && (@adx5 || 0) < ADX_MIN
-      return SignalStruct.new(type: :exit, side: :close, reason: 'VWAP loss + weak ADX (CE)', confidence: 0.8, context: ctx)
-    elsif position_side == :buy_pe && @vwap5 && @close > @vwap5 && (@adx5 || 0) < ADX_MIN
-      return SignalStruct.new(type: :exit, side: :close, reason: 'VWAP loss + weak ADX (PE)', confidence: 0.8, context: ctx)
-    end
-
-    # Time stop (e.g., >8m with <0.5R progress) — compute R from settings if you track entry premium
-    if entry_at && (Time.now - entry_at) > 8 * 60
-      return SignalStruct.new(type: :exit, side: :close, reason: 'time stop 8m', confidence: 0.6, context: ctx)
-    end
-
-    nil
-  end
-
-  private
-
-  def vwap_for(cs)
-    return nil unless cs.respond_to?(:vwap)
-
-    cs.vwap
-  end
-
-  def st_up?(st)   = st && (st.respond_to?(:trend_up?)   ? st.trend_up?   : st[:trend] == :up)
-  def st_down?(st) = st && (st.respond_to?(:trend_down?) ? st.trend_down? : st[:trend] == :down)
-
-  def vwap_ok?(dir)
-    return true unless @vwap5 # if VWAP unavailable, don't block
-    return @close > @vwap5 if dir == :long
-    return @close < @vwap5 if dir == :short
-
-    true
-  end
-
-  def conf_score(dir)
-    base = 0.6
-    base += 0.2 if dir == :long && st_up?(@st15)
-    base += 0.2 if dir == :short && st_down?(@st15)
-    base += 0.1 if (@adx5 || 0) >= (ADX_MIN + 5)
-    base.clamp(0.0, 1.0)
-  end
-
-  def ctx
-    {
-      adx5: @adx5,
-      st5: (if @st5.respond_to?(:trend)
-              @st5.trend
-            else
-              (if @long_bias
-                 :up
-               else
-                 (@short_bias ? :down : :flat)
-               end)
-            end),
-      st15: (@st15.respond_to?(:trend) ? @st15.trend : nil),
-      vwap: @vwap5,
-      close: @close
-    }
   end
 end
 

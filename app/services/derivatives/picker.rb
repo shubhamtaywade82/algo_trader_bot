@@ -51,7 +51,7 @@ module Derivatives
         expiry: @expiry,
         underlying_spot: (chain[:last_price].presence || ltp(@instrument)).to_f,
         iv_rank: iv_rank,
-        historical_data: @instrument.intraday_ohlc(interval: '5', days: 3) || historical_data
+        historical_data: @instrument.intraday_ohlc(interval: '5', days: 5) || historical_data
       )
       res = analyzer.analyze(signal_type: @side, strategy_type: @strategy_type, signal_strength: @signal_strength)
       return nil unless res[:proceed] && res[:selected]
