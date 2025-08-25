@@ -1,7 +1,7 @@
 # app/lib/state/position_cache.rb
 module State
   class PositionCache
-    KEY = "positions:v1" # { pos_key => {...} }
+    KEY = 'positions:v1' # { pos_key => {...} }
 
     def self.key(seg:, sid:, prod:)
       "#{seg}:#{sid}:#{prod}"

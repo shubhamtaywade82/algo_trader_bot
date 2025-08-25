@@ -1,7 +1,7 @@
 # app/lib/state/order_cache.rb
 module State
   class OrderCache
-    KEY = "orders:v1" # single hash stored in Rails.cache
+    KEY = 'orders:v1' # single hash stored in Rails.cache
 
     def self.fetch_all
       Rails.cache.fetch(KEY) { {} } # { client_ref => { ... } }
