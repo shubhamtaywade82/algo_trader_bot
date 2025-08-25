@@ -1175,10 +1175,10 @@ module Derivatives
         expiry: @expiry,
         underlying_spot: (chain[:last_price].presence || ltp(@instrument)).to_f,
         iv_rank: iv_rank,
-        historical_data: historical_data
+        historical_data: @instrument.intraday_ohlc(interval: '5', days: 3) || historical_data
       )
       res = analyzer.analyze(signal_type: @side, strategy_type: @strategy_type, signal_strength: @signal_strength)
-      return nil unless res[:proceed] && res[:selected]
+      return res unless res[:proceed] && res[:selected]
 
       drv = resolve_derivative(res[:selected], @expiry, @side)
       return nil unless drv
@@ -1251,7 +1251,7 @@ module Derivatives
     end
 
     def daily_candles
-      Dhanhq::API::Historical.daily(
+      DhanHQ::Models::HistoricalData.daily(
         securityId: @instrument.security_id,
         exchangeSegment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
@@ -1263,13 +1263,13 @@ module Derivatives
     end
 
     def intraday_candles
-      Dhanhq::API::Historical.intraday(
-        securityId: @instrument.security_id,
-        exchangeSegment: @instrument.exchange_segment,
+      DhanHQ::Models::HistoricalData.intraday(
+        security_id: @instrument.security_id,
+        exchange_segment: @instrument.exchange_segment,
         instrument: @instrument.instrument_type,
         interval: '5',
-        fromDate: 5.days.ago.to_date.iso8601,
-        toDate: Time.zone.today.iso8601
+        from_date: 5.days.ago.to_date.iso8601,
+        to_date: Time.zone.today.iso8601
       )
     rescue StandardError
       []
@@ -1736,7 +1736,7 @@ module Indicators
         adx_gate: 0.0,
         rsi_up_min: 0.0,
         rsi_down_max: 100.0,
-        min_candles: 10 # allow tiny series in demo
+        min_candles: 1 # allow tiny series in demo
       }
     end
 
@@ -2858,10 +2858,12 @@ module Option
     IV_RANK_MAX        = 0.80
     THETA_AVOID_HOUR   = 14.5 # 2:30 PM
     TOP_RANKED_LIMIT   = 10
+    MIN_ADX            = 20
 
-    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta
+    attr_reader :option_chain, :expiry, :underlying_spot, :historical_data, :iv_rank, :ta, :cfg
 
-    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [])
+    def initialize(option_chain, expiry:, underlying_spot:, iv_rank:, historical_data: [], config: Option::ChainConfig.current)
+      @cfg = config
       @option_chain     = option_chain.with_indifferent_access
       @expiry           = Date.parse(expiry.to_s)
       @underlying_spot  = underlying_spot.to_f
@@ -2900,7 +2902,7 @@ module Option
       result[:trend]    = ta ? ta.bias.to_sym     : intraday_trend
       result[:momentum] = ta ? ta.momentum.to_sym : :flat
       result[:adx]      = ta&.adx
-      adx_ok            = ta ? ta.adx.to_f >= 25 : true
+      adx_ok            = ta ? ta.adx.to_f >= MIN_ADX : true
 
       if result[:proceed] && !(trend_confirms?(result[:trend], signal_type) && adx_ok && result[:momentum] != :flat)
         result[:proceed] = false
@@ -3169,51 +3171,102 @@ module Option
 end
 
 
+# File: app/services/option/chain_config.rb
+# frozen_string_literal: true
+
+module Option
+  class ChainConfig
+    class << self
+      def current = new
+
+      # ------------- gates -------------
+      def iv_rank_min        = Setting.fetch_f('opt.iv_rank_min', 0.00)
+      def iv_rank_max        = Setting.fetch_f('opt.iv_rank_max', 0.80)
+      def theta_avoid_hour   = Setting.fetch_f('opt.theta_avoid_hour', 14.5) # 2:30pm
+      def min_adx            = Setting.fetch_f('opt.min_adx', 25.0)
+
+      # ------------- ranking -----------
+      def top_ranked_limit   = Setting.fetch_i('opt.top_ranked_limit', 10)
+      def efficiency_weight  = Setting.fetch_f('opt.efficiency_weight', 30.0)
+
+      # ------------- Δ thresholds by hour -----------
+      # Hours are 24h integer keys; value = min |Δ|
+      def min_delta_by_hour
+        json = Setting.fetch('opt.min_delta_by_hour_json', nil)
+        (json ? JSON.parse(json) : { '11' => 0.30, '13' => 0.35, '14' => 0.45, 'else' => 0.25 })
+          .transform_keys!(&:to_s)
+      rescue StandardError
+        { '11' => 0.30, '13' => 0.35, '14' => 0.45, 'else' => 0.25 }
+      end
+
+      # ------------- ATM band by IV rank -----------
+      # Each tuple: [max_iv_rank, pct_band]
+      def atm_bands
+        json = Setting.fetch('opt.atm_bands_json', nil)
+        json ? JSON.parse(json) : [[0.20, 0.010], [0.50, 0.015], [1.00, 0.025]]
+      rescue StandardError
+        [[0.20, 0.010], [0.50, 0.015], [1.00, 0.025]]
+      end
+
+      # ------------- scoring knobs -----------
+      def lw_intraday = Setting.fetch_f('opt.liquidity_weight_intraday', 0.35)
+      def mw_intraday = Setting.fetch_f('opt.momentum_weight_intraday', 0.35)
+      def gw_intraday = Setting.fetch_f('opt.greeks_weight_intraday',   0.30)
+
+      def lw_swing    = Setting.fetch_f('opt.liquidity_weight_swing',   0.25)
+      def mw_swing    = Setting.fetch_f('opt.momentum_weight_swing',    0.25)
+      def gw_swing    = Setting.fetch_f('opt.greeks_weight_swing',      0.50)
+
+      def theta_weight_before_13 = Setting.fetch_f('opt.theta_weight_before_13', 3.0)
+      def theta_weight_after_13  = Setting.fetch_f('opt.theta_weight_after_13',  4.0)
+      def theta_penalty_days     = Setting.fetch_i('opt.theta_penalty_days', 3)
+      def theta_penalty_mult     = Setting.fetch_f('opt.theta_penalty_mult', 2.0)
+
+      def momentum_strong_boost  = Setting.fetch_f('opt.momentum_strong_boost', 1.15)
+
+      # IV skew / z‑score adjustments
+      def zscore_penalize_above  = Setting.fetch_f('opt.zscore_penalize_above', 1.5)
+      def zscore_factor          = Setting.fetch_f('opt.zscore_factor', 0.90)
+      def skew_tilt_boost        = Setting.fetch_f('opt.skew_tilt_boost', 1.10)
+
+      # IV vs HV sanity
+      def iv_hv_ratio_cap        = Setting.fetch_f('opt.iv_hv_ratio_cap', 1.5)
+      def iv_hv_ratio_factor     = Setting.fetch_f('opt.iv_hv_ratio_factor', 0.90)
+
+      # Misc
+      def atm_window_strikes     = Setting.fetch_i('opt.atm_window_strikes', 3)
+    end
+  end
+end
+
+
 # File: app/services/options/chain_analyzer.rb
 # frozen_string_literal: true
 
 module Options
-  # Facade for legacy callers. Picks ATM± range via Option::ChainAnalyzer and
-  # returns a single best row with derivative details (security_id, lot_size, …)
+  # Backcompat facade: delegates selection to Derivatives::Picker (which uses
+  # Option::ChainAnalyzer under the hood) and returns the old "legacy row" hash.
   class ChainAnalyzer < ApplicationService
     def initialize(underlying:, side:, config: {})
       @ul     = underlying
       @side   = side.to_s.downcase.to_sym # :ce / :pe
-      @config = {
-        strategy_type: 'intraday'
-      }.merge(config || {})
+      @config = { strategy_type: 'intraday' }.merge(config || {})
     end
 
     def call
-      expiry = nearest_expiry(@ul)
-      return nil unless expiry
+      pick = Derivatives::Picker.call(
+        instrument: @ul,
+        side: @side,
+        strategy_type: @config[:strategy_type]
+      )
+      return nil unless pick&.selected && pick.derivative
 
-      chain = safe_fetch_option_chain(@ul, expiry)
+      # Re-fetch chain for the chosen expiry to extract bid/ask exactly like before
+      chain = safe_fetch_option_chain(@ul, pick.expiry)
       return nil if chain.blank? || chain[:oc].blank?
 
-      iv_rank = compute_iv_rank(chain)
-      spot    = chain[:last_price].to_f.nonzero? || @ul.ws_ltp || @ul.ltp
-      hist    = intraday_candles(@ul)
-
-      # Use the advanced analyzer
-      analyzer = Option::ChainAnalyzer.new(
-        chain,
-        expiry: expiry,
-        underlying_spot: spot.to_f,
-        iv_rank: iv_rank,
-        historical_data: hist
-      )
-
-      result = analyzer.analyze(signal_type: @side, strategy_type: @config[:strategy_type])
-
-      return nil unless result[:proceed] && (sel = result[:selected])
-
-      # Enrich with derivative info (security_id, lot, segment) and bid/ask
-      leg = to_legacy_row(@ul, chain, sel, expiry, @side)
-      return nil unless leg
-
-      # Final light guard (keeps your old expectations: non‑zero price, etc.)
-      return nil if leg[:ltp].to_f <= 0
+      leg = to_legacy_row(@ul, chain, pick.selected, pick.expiry, pick.side)
+      return nil unless leg && leg[:ltp].to_f.positive?
 
       leg
     rescue StandardError => e
@@ -3223,12 +3276,6 @@ module Options
 
     private
 
-    def nearest_expiry(inst)
-      Array(inst.expiry_list).first
-    rescue StandardError
-      nil
-    end
-
     def safe_fetch_option_chain(inst, expiry)
       inst.fetch_option_chain(expiry)
     rescue StandardError => e
@@ -3236,54 +3283,16 @@ module Options
       nil
     end
 
-    # Same formula you used inside AlertProcessors::Index#iv_rank_for
-    def compute_iv_rank(chain)
-      atm = determine_atm_strike(chain)
-      return 0.5 unless atm
-
-      key   = format('%.6f', atm)
-      ce_iv = chain[:oc].dig(key, 'ce', 'implied_volatility').to_f
-      pe_iv = chain[:oc].dig(key, 'pe', 'implied_volatility').to_f
-      cur   = [ce_iv, pe_iv].select(&:positive?).then { |arr| arr.empty? ? 0.0 : (arr.sum / arr.size) }
-
-      ivs = chain[:oc].values.flat_map { |row| %w[ce pe].map { |k| row.dig(k, 'implied_volatility').to_f } }.reject(&:zero?)
-      return 0.5 if ivs.empty? || ivs.max == ivs.min
-
-      ((cur - ivs.min) / (ivs.max - ivs.min)).clamp(0, 1).round(2)
-    rescue StandardError
-      0.5
-    end
-
-    def determine_atm_strike(chain)
-      spot = chain[:last_price].to_f
-      chain[:oc].keys.map(&:to_f).min_by { |s| (s - spot).abs }
-    rescue StandardError
-      nil
-    end
-
-    def intraday_candles(inst)
-      DhanHQ::Models::HistoricalData.intraday(
-        security_id: inst.security_id,
-        exchange_segment: inst.exchange_segment,
-        instrument: inst.instrument_type,
-        interval: '5',
-        from_date: 5.days.ago.to_date.to_s,
-        to_date: Time.zone.today.to_s
-      )
-    rescue StandardError
-      []
-    end
-
+    # unchanged: exactly your previous mapper, so legacy consumers get the same shape/fields
     def to_legacy_row(inst, chain, sel, expiry, side)
       strike_f = sel[:strike_price].to_f
       strike_key = format('%.6f', strike_f)
       side_s     = side.to_s
 
-      node       = chain[:oc][strike_key]
-      side_node  = node && node[side_s]
+      node      = chain[:oc][strike_key]
+      side_node = node && node[side_s]
       return nil unless side_node
 
-      # Map to DB derivative
       derivative = inst.derivatives.find_by(
         strike_price: strike_f,
         expiry_date: expiry,
@@ -3291,14 +3300,13 @@ module Options
       )
       return nil unless derivative
 
-      bid = side_node['top_bid_price'].to_f
-      ask = side_node['top_ask_price'].to_f
-      mid = [(bid + ask) / 2.0, sel[:last_price].to_f].compact.max
-      spread = ask.positive? && bid.positive? ? (ask - bid).abs : nil
+      bid     = side_node['top_bid_price'].to_f
+      ask     = side_node['top_ask_price'].to_f
+      mid     = [(bid + ask) / 2.0, sel[:last_price].to_f].compact.max
+      spread  = ask.positive? && bid.positive? ? (ask - bid).abs : nil
       spread_pct = mid.positive? && spread ? ((spread / mid) * 100.0) : nil
 
       {
-        # legacy shape expected by Strategy loop
         security_id: derivative.security_id,
         symbol: derivative.symbol_name || inst.symbol_name,
         cp: side.to_s.upcase.to_sym, # :CE / :PE
@@ -4067,7 +4075,6 @@ module Runner
       end
 
       inst = fetch_instrument(sym)
-      pp inst
       unless inst
         notify_step(:instrument, "skip: not found #{sym}")
         return
@@ -4078,9 +4085,9 @@ module Runner
 
       leg = Options::ChainAnalyzer.call(
         underlying: inst, side: side,
-        config: { strategy_type: (@mode.scalp ? 'intraday' : 'market') }
+        config: { strategy_type: (@mode.scalp ? 'intraday' : 'margin') }
       )
-      pp leg
+
       unless leg && leg[:ltp].to_f.positive?
         notify_step(:picker, 'skip: no leg/ltp<=0')
         return
