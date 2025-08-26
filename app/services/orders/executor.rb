@@ -41,7 +41,6 @@ module Orders
           client_ref: @client_ref
         )
 
-        pp params
         # 3) Place Super Order (returns model with order_id/order_status)
         so = DhanHQ::Models::SuperOrder.create(params)
         raise 'SuperOrder.create failed' unless so&.order_id

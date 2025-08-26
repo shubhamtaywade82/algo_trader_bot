@@ -65,6 +65,7 @@ module Options
       spread_pct = mid.positive? && spread ? ((spread / mid) * 100.0) : nil
 
       {
+        derivative: derivative,
         security_id: derivative.security_id,
         symbol: derivative.symbol_name || inst.symbol_name,
         cp: side.to_s.upcase.to_sym, # :CE / :PE
@@ -72,7 +73,7 @@ module Options
         ltp: sel[:last_price].to_f,
         bid: bid,
         ask: ask,
-        spread_pct: (spread_pct && spread_pct.round(3)) || 999.0,
+        spread_pct: spread_pct&.round(3) || 999.0,
         volume: sel[:volume].to_i,
         oi: sel[:oi].to_i,
         iv: sel[:iv].to_f,

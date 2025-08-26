@@ -3,6 +3,7 @@
 module Runner
   class AutoPilot < ApplicationService
     WINDOW = { start: '09:20', stop: '15:15' }.freeze
+    MARKET_TZ = 'Asia/Kolkata'
 
     MODE = Struct.new(:name, :tf, :adx_min, :profit_arm_pct, :time_stop_s, :scalp,
                       keyword_init: true)
@@ -27,6 +28,13 @@ module Runner
       @demo = demo || (mode.to_s == 'demo')
       @roster  = roster || @symbols
       @running = Concurrent::AtomicBoolean.new(false)
+
+      @budget = Execution::Budget.new(
+        funds_balance: DhanHQ::Models::Funds.balance,
+        max_day_loss: ENV.fetch('MAX_DAY_LOSS', '3000'),
+        profit_trigger_rupees: ENV.fetch('PROFIT_TRIGGER_RUPEES', '1000'),
+        allocation_pct: ENV.fetch('ALLOC_PCT', '0.30')
+      )
       @last_entry_at = {}
     end
 
@@ -91,6 +99,7 @@ module Runner
     end
 
     def process_symbol(sym, series)
+      notify_step(:seperateor, '---------------------------------------------------------')
       notify_step(:gate_start, "→ #{sym} (#{@mode.name}/tf=#{@mode.tf})")
 
       if Regime::ChopDetector.choppy_pre_entry?(series, series, adx_min: @mode.adx_min)
@@ -151,7 +160,6 @@ module Runner
       end
       notify_step(:risk_guard, "ok (₹#{expected_risk.round(2)})")
 
-      pp leg
       place_super(leg, side, qty, sl: sl, tp: tp, trail: trail)
       @last_entry_at[sym] = Time.current unless @demo
       notify_step(:placed, @demo ? "DEMO: would place BUY #{side.upcase}" : 'order placed')
@@ -202,7 +210,6 @@ module Runner
         trail_sl_jump: (trail.positive? ? trail : nil),
         client_ref: client_ref
       )
-      Rails.logger.info("[AutoPilot] Super params → #{params}")
       notify_step(:super_params, params.inspect)
 
       # DEMO forces dry-run; otherwise keep existing PLACE_ORDER flag
@@ -292,12 +299,24 @@ module Runner
       t && (Time.current - t) < 90 # cool‑down 90s per underlying
     end
 
-    def inside_session?(now = Time.zone.now)
+    def inside_session?(now = Time.current)
       return true if @demo
 
-      t1 = Time.zone.parse(WINDOW[:start])
-      t2 = Time.zone.parse(WINDOW[:stop])
-      now.between?(t1, t2) && MarketCalendar.trading_day?(now.to_date)
+      tz   = Time.find_zone!(MARKET_TZ)
+      day  = tz.today
+      t1   = tz.parse("#{day} #{WINDOW[:start]}")
+      t2   = tz.parse("#{day} #{WINDOW[:stop]}")
+      curr = now.in_time_zone(tz)
+
+      # Handle windows that might cross midnight (not your case, but robust)
+      in_window =
+        if t2 < t1
+          (curr >= t1) || (curr <= t2)
+        else
+          curr.between?(t1, t2)
+        end
+
+      in_window && MarketCalendar.trading_day?(day)
     end
 
     def tf_for(tf)
