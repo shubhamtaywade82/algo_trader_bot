@@ -68,6 +68,8 @@ module Execution
         @last_trail_set_at = now
       end
 
+      
+
       # Stale-win: if sufficiently up but no new high for N seconds → book
       if (ltp >= (@entry_price * (1 + @policy.stale_win_min_gain_pct))) && ((now - @last_high_ts) >= @policy.stale_secs)
         exit_market!('STALE_WIN', ltp)
