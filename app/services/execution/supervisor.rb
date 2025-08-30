@@ -82,9 +82,15 @@ module Execution
 
         qty = (p.respond_to?(:quantity) ? p.quantity : p.try(:net_qty) || 0).to_i
         next if qty <= 0 # only long legs we own
-
         entry = (p.respond_to?(:average_price) ? p.average_price : p.try(:avg_price) || 0).to_f
         next if entry <= 0.0
+        ptype = if p.respond_to?(:product_type)
+          p.product_type
+        elsif p.respond_to?(:productType)
+          p.productType
+        else
+          nil
+        end
 
         attrs = {
           exchange_segment: seg,
@@ -92,7 +98,8 @@ module Execution
           side: 'BUY',
           quantity: qty,
           entry_price: entry,
-          placed_with_super_order: p.respond_to?(:super_order?) ? !!p.super_order? : false
+          placed_with_super_order: p.respond_to?(:super_order?) ? !!p.super_order? : false,
+          product_type: ptype
         }
         register_position!(attrs)
       end
@@ -111,7 +118,8 @@ module Execution
         quantity: attrs[:quantity].to_i,
         entry_price: attrs[:entry_price].to_f,
         policy: Execution::RiskPolicy.load,
-        placed_with_super_order: !!attrs[:placed_with_super_order]
+        placed_with_super_order: !!attrs[:placed_with_super_order],
+        product_type: attrs[:product_type]
       )
     end
 
