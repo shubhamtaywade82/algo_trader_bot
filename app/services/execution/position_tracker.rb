@@ -9,9 +9,9 @@ module Execution
 
     attr_reader :exchange_segment, :security_id, :side, :quantity,
                 :entry_price, :highest_ltp, :trail_anchor_price,
-                :sl_price, :tp_price, :status, :placed_with_super_order
+                :sl_price, :tp_price, :status, :placed_with_super_order, :product_type
 
-    def initialize(exchange_segment:, security_id:, side:, quantity:, entry_price:, policy:, placed_with_super_order: false)
+    def initialize(exchange_segment:, security_id:, side:, quantity:, entry_price:, policy:, placed_with_super_order: false, product_type: nil)
       @exchange_segment = exchange_segment.to_s
       @security_id      = security_id.to_s
       @side             = side.to_s # 'BUY'
@@ -19,6 +19,7 @@ module Execution
       @entry_price      = entry_price.to_f
       @policy           = policy
       @placed_with_super_order = !!placed_with_super_order
+      @product_type     = product_type&.to_s
 
       raise ArgumentError, 'only BUY options supported' unless @side == 'BUY'
       raise ArgumentError, 'entry_price must be > 0' if @entry_price <= 0
@@ -135,7 +136,7 @@ module Execution
         DhanHQ::Models::Order.create!(
           transaction_type: 'SELL',
           exchange_segment: @exchange_segment,
-          product_type: 'INTRADAY',
+          product_type:     (@product_type || 'INTRADAY'),
           order_type: 'MARKET',
           validity: 'DAY',
           security_id: @security_id,
