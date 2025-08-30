@@ -13,18 +13,22 @@ module Execution
     def boot!
       reconcile_open_positions!
 
-      # Periodic reconcile to catch manual closes or broker-side changes
-      @reconciler_thread ||= Thread.new do
-        Thread.current.name = begin
-          'exit_reconciler'
-        rescue StandardError
-          nil
-        end
-        loop do
-          sleep 60
-          reconcile_open_positions!
-        end
-      end
+      @reconciler_task ||= Concurrent::TimerTask.new(execution_interval: 60) do
+        reconcile_open_positions!
+      end.tap(&:execute)
+
+      # # Periodic reconcile to catch manual closes or broker-side changes
+      # @reconciler_thread ||= Thread.new do
+      #   Thread.current.name = begin
+      #     'exit_reconciler'
+      #   rescue StandardError
+      #     nil
+      #   end
+      #   loop do
+      #     sleep 60
+      #     reconcile_open_positions!
+      #   end
+      # end
     end
 
     # WS tick handler
@@ -112,13 +116,13 @@ module Execution
     end
 
     def subscribe!(segment, security_id)
-      $WS.subscribe_one(segment: segment, security_id: security_id)
+      Live::WsHub.instance.subscribe(seg: segment, sid: security_id)
     rescue StandardError => e
       Rails.logger.error("[Supervisor] subscribe #{segment}:#{security_id} failed: #{e.message}")
     end
 
     def unsubscribe!(segment, security_id)
-      $WS.unsubscribe_one(segment: segment, security_id: security_id)
+      Live::WsHub.instance.unsubscribe(seg: segment, sid: security_id)
     rescue StandardError => e
       Rails.logger.warn("[Supervisor] unsubscribe #{segment}:#{security_id} failed: #{e.message}")
     end

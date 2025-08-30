@@ -45,7 +45,8 @@ module Execution
       # Update high water mark
       if ltp > @highest_ltp
         @highest_ltp = ltp
-        @last_high_ts = ts ? Time.at(ts) : now
+        # @last_high_ts = ts ? Time.zone.at(ts) : now
+        @last_high_ts = epoch_to_time(ts)
       end
 
       # Move SL→entry once breakeven threshold reached
@@ -77,6 +78,14 @@ module Execution
         exit_market!('SL_HIT', ltp)
       elsif ltp >= @tp_price
         exit_market!('TP_HIT', ltp)
+      end
+    end
+
+    def epoch_to_time(ts)
+      if ts && ts > 2_000_000_000
+        Time.zone.at(ts / 1000.0)
+      else
+        (ts ? Time.zone.at(ts) : Time.zone.now)
       end
     end
 
