@@ -112,7 +112,7 @@ module Execution
     private
 
     def maybe_sync_broker_bracket!
-      return unless @placed_with_super_order
+      return unless @placed_with_super_order && (Time.current - (@last_bracket_sync_at || Time.zone.at(0))) >= 2
 
       # If you used a SuperOrder for entry, tighten the bracket at broker
       DhanHQ::Models::SuperOrder.modify(
