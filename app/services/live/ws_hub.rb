@@ -7,6 +7,8 @@ module Live
   class WsHub
     include Singleton
 
+    attr_reader :exit_hook_attached
+
     def initialize
       @running  = Concurrent::AtomicBoolean.new(false)
       @client   = nil
@@ -70,6 +72,16 @@ module Live
         subscribe(seg: seg, sid: sid.to_s)
       end
       self
+    end
+
+    def attach_exit_engine!
+      return if @exit_hook_attached
+
+      on_tick do |t|
+        Execution::Supervisor.instance.on_tick(t) if t[:segment] == 'NSE_FNO' && t[:security_id] && t[:ltp]
+      end
+
+      @exit_hook_attached = true
     end
 
     private

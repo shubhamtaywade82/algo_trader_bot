@@ -4,7 +4,7 @@ default: &default
     - { segment: "IDX_I", security_id: "13" } # NIFTY index value
     - { segment: "IDX_I", security_id: "25" } # BANKNIFTY index value
     - { segment: "IDX_I", security_id: "51" }
-    - { segment: "MCX_COMM", security_id: "450134" }
+    # - { segment: "MCX_COMM", security_id: "450134" }
     # add any options you always want live:
     # - { segment: "NSE_FNO", security_id: "12345" }
 

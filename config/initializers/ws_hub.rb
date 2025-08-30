@@ -2,11 +2,18 @@
 
 if ENV['ENABLE_WS'] == 'true'
   cfg = Rails.application.config_for(:dhan_ws)
+
   Rails.application.config.to_prepare do
-    Live::WsHub.instance.start!(mode: (cfg['mode'] || 'quote').to_sym)
+    hub = Live::WsHub.instance
+    hub.start!(mode: (cfg['mode'] || 'quote').to_sym)
+
+    hub.attach_exit_engine! # clean, idempotent
+
     Array(cfg['initial']).each do |h|
-      Live::WsHub.instance.subscribe(seg: h[:segment], sid: h[:security_id])
+      hub.subscribe(seg: h[:segment], sid: h[:security_id])
     end
+
+    Execution::Supervisor.instance.boot!
   end
 
   at_exit do

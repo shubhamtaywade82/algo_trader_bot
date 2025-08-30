@@ -16,6 +16,18 @@ class TelegramNotifier
     post('sendChatAction', chat_id:, action:)
   end
 
+  def self.notify_entry(label, price, qty:)
+    send_message("✅ ENTRY #{label} @ #{fmt(price)} (qty #{qty})")
+  end
+
+  def self.notify_exit(label, price, reason:)
+    send_message("🚪 EXIT  #{label} @ #{fmt(price)} (#{reason})")
+  end
+
+  def self.fmt(n)
+    format('%.2f', n.to_f)
+  end
+
   private_class_method def self.post(method, **params)
     uri = URI("#{TELEGRAM_API}/bot#{ENV.fetch('TELEGRAM_BOT_TOKEN')}/#{method}")
     res = Net::HTTP.post_form(uri, params)
