@@ -38,6 +38,7 @@ module Execution
     # Called on every tick for this instrument
     def on_ltp(ltp, ts = nil)
       return unless active?
+      return unless ltp
 
       ltp = ltp.to_f
       now = Time.zone.now

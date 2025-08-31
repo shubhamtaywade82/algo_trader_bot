@@ -21,7 +21,7 @@ class TelegramNotifier
   end
 
   def self.notify_exit(label, price, reason:)
-    send_message("🚪 EXIT  #{label} @ #{fmt(price)} (#{reason})")
+    send_message("🚪 EXIT #{label} @ #{fmt(price)} (#{reason})")
   end
 
   def self.fmt(n)

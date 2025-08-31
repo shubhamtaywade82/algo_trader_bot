@@ -62,7 +62,11 @@ module Runner
     def manage_position(p)
       ins = p.instrument
       ltp = Live::TickCache.ltp(ins.exchange_segment, ins.security_id)
-      return unless ltp >= (@tp_price * 0.995)
+      if ltp < (@tp_price * 0.995) && (ltp >= (@entry_price * (1 + @policy.stale_win_min_gain_pct))) &&
+         ((now - @last_high_ts) >= @policy.stale_secs)
+        exit_market!('STALE_WIN', ltp)
+        return
+      end
 
       # update unrealized P&L in rupees for options buying (premium delta * qty)
       entry = p.entry_price.to_f.nonzero? || p.order&.entry_price.to_f
