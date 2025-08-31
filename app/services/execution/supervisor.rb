@@ -69,7 +69,6 @@ module Execution
     # Pull open positions from broker and mirror into trackers
     def reconcile_open_positions!
       positions = Array(DhanHQ::Models::Position.active)
-
       keep_keys = []
 
       positions.each do |p|
@@ -82,15 +81,17 @@ module Execution
 
         qty = (p.respond_to?(:quantity) ? p.quantity : p.try(:net_qty) || 0).to_i
         next if qty <= 0 # only long legs we own
+
         entry = (p.respond_to?(:average_price) ? p.average_price : p.try(:avg_price) || 0).to_f
         next if entry <= 0.0
+
         ptype = if p.respond_to?(:product_type)
-          p.product_type
-        elsif p.respond_to?(:productType)
-          p.productType
-        else
-          nil
-        end
+                  p.product_type
+                elsif p.respond_to?(:productType)
+                  p.productType
+                else
+                  nil
+                end
 
         attrs = {
           exchange_segment: seg,

@@ -11,7 +11,8 @@ module Execution
                 :entry_price, :highest_ltp, :trail_anchor_price,
                 :sl_price, :tp_price, :status, :placed_with_super_order, :product_type
 
-    def initialize(exchange_segment:, security_id:, side:, quantity:, entry_price:, policy:, placed_with_super_order: false, product_type: nil)
+    def initialize(exchange_segment:, security_id:, side:, quantity:, entry_price:, policy:, placed_with_super_order: false,
+                   product_type: nil)
       @exchange_segment = exchange_segment.to_s
       @security_id      = security_id.to_s
       @side             = side.to_s # 'BUY'
@@ -19,7 +20,7 @@ module Execution
       @entry_price      = entry_price.to_f
       @policy           = policy
       @placed_with_super_order = !!placed_with_super_order
-      @product_type     = product_type&.to_s
+      @product_type = product_type&.to_s
 
       raise ArgumentError, 'only BUY options supported' unless @side == 'BUY'
       raise ArgumentError, 'entry_price must be > 0' if @entry_price <= 0
@@ -69,7 +70,11 @@ module Execution
         @last_trail_set_at = now
       end
 
-      
+      if (ltp < (@tp_price * 0.995)) && (ltp >= (@entry_price * (1 + @policy.stale_win_min_gain_pct))) &&
+         ((now - @last_high_ts) >= @policy.stale_secs)
+        exit_market!('STALE_WIN', ltp)
+        return
+      end
 
       # Stale-win: if sufficiently up but no new high for N seconds → book
       if (ltp >= (@entry_price * (1 + @policy.stale_win_min_gain_pct))) && ((now - @last_high_ts) >= @policy.stale_secs)
@@ -139,7 +144,7 @@ module Execution
         DhanHQ::Models::Order.create!(
           transaction_type: 'SELL',
           exchange_segment: @exchange_segment,
-          product_type:     (@product_type || 'INTRADAY'),
+          product_type: @product_type || 'INTRADAY',
           order_type: 'MARKET',
           validity: 'DAY',
           security_id: @security_id,
