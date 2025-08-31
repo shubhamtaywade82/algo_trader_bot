@@ -15,7 +15,7 @@ Exits::MicroTP.call(
 module Runner
   class PositionsLoop
     INTERVAL = 0.5 # seconds
-    TZ       = 'Asia/Kolkata'
+    TZ       = 'Asia/Kolkata'.freeze
 
     def initialize
       @risk    = Risk::Guard.new
@@ -95,7 +95,7 @@ module Runner
       loss = @risk.realized_loss_today_abs
       # approximate unrealized loss across all open positions (only negative P&L counts)
       unreal = Position.open.sum('LEAST(unrealized_pnl, 0)').to_f.abs
-      return unless (loss + unreal) >= cap && cap > 0
+      return unless (loss + unreal) >= cap&.positive?
 
       Rails.logger.warn("[HARD-FLAT] Daily cap breached (#{loss + unreal} >= #{cap}) → closing all + disabling trading")
       flatten_all!
