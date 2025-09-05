@@ -1,0 +1,22 @@
+default: &default
+  LLM_AGENT_URL: http://127.0.0.1:4000/signal
+  LLM_AGENT_TIMEOUT: 20
+  LLM_AGENT_KEY: changeme
+  LLM_MODE: advisory
+  LLM_REQUIRE_APPROVAL: false
+  LLM_API_KEY: changeme
+  PAPER_MODE: true
+  EXECUTE_ORDERS: false
+  ENTRY_CUTOFF: "15:20"
+  EOD_SQUARE_OFF: "15:28"
+  MAX_TRADES_PER_DAY: 2
+  DAILY_MAX_LOSS: 0.02
+
+development:
+  <<: *default
+
+test:
+  <<: *default
+
+production:
+  <<: *default

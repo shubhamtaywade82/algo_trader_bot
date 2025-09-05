@@ -74,3 +74,5 @@ gem 'ruby-openai'
 gem 'ruby-technical-analysis'
 gem 'technical-analysis'
 gem 'whenever', require: false
+gem 'faraday', '~> 1.10'
+gem 'faraday-retry', '~> 1.0'

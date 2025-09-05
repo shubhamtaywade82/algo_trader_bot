@@ -126,6 +126,38 @@ module Runner
       side = (trend == :up ? :ce : :pe)
       notify_step(:picker, "choose side=#{side}")
 
+      # ----- LLM advisory integration -----
+      adx_val = begin
+        series.adx(14)
+      rescue StandardError
+        nil
+      end
+
+      ivp = begin
+        picker = Derivatives::Picker.call(instrument: inst, side: side)
+        (picker&.iv_rank.to_f * 100).round(2)
+      rescue StandardError
+        0.0
+      end
+
+      plan = Llm::SignalService.propose(
+        symbol: sym,
+        trend: (trend == :up ? :bullish : :bearish),
+        adx: adx_val,
+        ivp: ivp
+      )
+
+      if plan
+        decision = Risk::Gatekeeper.evaluate(plan: plan, facts: { iv_percentile: ivp })
+        if decision.intent == :enter
+          Orders::Flow.place_from_plan(plan)
+          notify_step(:placed, @demo ? "DEMO: would place BUY via LLM" : 'order placed')
+        else
+          notify_step(:gate_llm, "skip: #{decision.reason}")
+        end
+        return
+      end
+
       leg = Options::ChainAnalyzer.call(
         underlying: inst, side: side,
         config: { strategy_type: (@mode.scalp ? 'intraday' : 'margin') }

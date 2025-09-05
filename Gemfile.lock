@@ -494,6 +494,8 @@ DEPENDENCIES
   debug
   delayed_job_active_record
   dotenv-rails
+  faraday (~> 1.10)
+  faraday-retry (~> 1.0)
   importmap-rails
   jbuilder
   kamal

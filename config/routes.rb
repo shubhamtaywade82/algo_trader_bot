@@ -7,4 +7,16 @@ Rails.application.routes.draw do
 
   # Defines the root path route ("/")
   # root "posts#index"
+
+  scope :llm do
+    get  :funds,        to: 'llm#funds'
+    get  :positions,    to: 'llm#positions'
+    get  :orders,       to: 'llm#orders'
+    get  :spot,         to: 'llm#spot'
+    get  :quote,        to: 'llm#quote'
+    get  :option_chain, to: 'llm#option_chain'
+    post :place_bracket_order, to: 'llm#place_bracket_order'
+    post :modify_order,        to: 'llm#modify_order'
+    post :cancel_order,        to: 'llm#cancel_order'
+  end
 end
