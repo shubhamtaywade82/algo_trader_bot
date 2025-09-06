@@ -1,7 +1,7 @@
 # app/lib/state/order_cache.rb
 module State
   class OrderCache
-    KEY = 'orders:v1' # single hash stored in Rails.cache
+    KEY = 'orders:v1'.freeze # single hash stored in Rails.cache
 
     def self.fetch_all
       Rails.cache.fetch(KEY) { {} } # { client_ref => { ... } }
@@ -9,7 +9,7 @@ module State
 
     def self.get(client_ref) = fetch_all[client_ref]
 
-    def self.put!(client_ref, payload)
+    def self.store!(client_ref, payload) # rubocop:disable Naming/PredicateMethod
       h = fetch_all
       h[client_ref] = payload
       Rails.cache.write(KEY, h)

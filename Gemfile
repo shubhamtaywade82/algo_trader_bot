@@ -70,6 +70,8 @@ gem 'activerecord-import'
 gem 'csv', require: false
 gem 'daemons'
 gem 'delayed_job_active_record'
+gem 'faraday', '~> 1.10'
+gem 'faraday-retry', '~> 1.0'
 gem 'ruby-openai'
 gem 'ruby-technical-analysis'
 gem 'technical-analysis'

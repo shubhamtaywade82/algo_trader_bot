@@ -135,7 +135,7 @@ class CandleSeries
     recent_lows.sort[1]   # 2nd lowest
   end
 
-  def liquidity_grab_up?(lookback: 20)
+  def liquidity_grab_up?(_lookback: 20)
     high_now = candles.last.high
     high_prev = previous_swing_high
 
@@ -144,7 +144,7 @@ class CandleSeries
       candles.last.bearish?
   end
 
-  def liquidity_grab_down?(lookback: 20)
+  def liquidity_grab_down?(_lookback: 20)
     low_now = candles.last.low
     low_prev = previous_swing_low
 

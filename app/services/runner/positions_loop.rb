@@ -1,5 +1,5 @@
 # app/services/runner/positions_loop.rb (inside loop, when you have p, ltp)
-Positions::Manager.call(position: p)
+Positions::Manager.call(position: Rails.logger.debug)
 Exits::MicroTP.call(
   order: p.order,
   ltp: ltp,
@@ -85,7 +85,7 @@ module Runner
       hard_flat_if_cap_breached!
     end
 
-    def infer_side(p)
+    def infer_side(_p)
       # For long options we buy premium; if you store CE/PE, wire this properly.
       :buy_ce
     end

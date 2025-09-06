@@ -10,7 +10,7 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.0].define(version: 2025_08_23_103729) do
+ActiveRecord::Schema[8.0].define(version: 2025_09_06_090659) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
 
@@ -205,5 +205,52 @@ ActiveRecord::Schema[8.0].define(version: 2025_08_23_103729) do
     t.index ["key"], name: "index_settings_on_key", unique: true
   end
 
+  create_table "trading_positions", force: :cascade do |t|
+    t.bigint "instrument_id", null: false
+    t.string "strategy", null: false
+    t.string "side", null: false
+    t.integer "quantity", null: false
+    t.decimal "entry_price", precision: 12, scale: 2, null: false
+    t.decimal "current_price", precision: 12, scale: 2
+    t.decimal "stop_loss", precision: 12, scale: 2
+    t.decimal "take_profit", precision: 12, scale: 2
+    t.decimal "risk_per_trade", precision: 8, scale: 4, default: "0.02"
+    t.decimal "risk_reward_ratio", precision: 8, scale: 2, default: "2.0"
+    t.decimal "expected_profit", precision: 14, scale: 2
+    t.decimal "expected_loss", precision: 14, scale: 2
+    t.decimal "current_pnl", precision: 14, scale: 2, default: "0.0"
+    t.decimal "max_profit", precision: 14, scale: 2, default: "0.0"
+    t.decimal "max_loss", precision: 14, scale: 2, default: "0.0"
+    t.string "status", default: "active"
+    t.decimal "confidence", precision: 3, scale: 2, default: "0.5"
+    t.string "exit_reason"
+    t.decimal "exit_price", precision: 12, scale: 2
+    t.datetime "exit_time"
+    t.string "order_id"
+    t.string "client_ref"
+    t.string "dhan_order_id"
+    t.datetime "entry_time", null: false
+    t.datetime "last_update_time"
+    t.integer "duration_minutes", default: 0
+    t.boolean "stop_loss_hit", default: false
+    t.boolean "take_profit_hit", default: false
+    t.boolean "time_exit_triggered", default: false
+    t.boolean "risk_exit_triggered", default: false
+    t.decimal "trailing_stop_price", precision: 12, scale: 2
+    t.decimal "trailing_stop_percentage", precision: 5, scale: 2
+    t.boolean "trailing_stop_active", default: false
+    t.decimal "portfolio_allocation", precision: 8, scale: 4
+    t.decimal "daily_pnl_contribution", precision: 14, scale: 2, default: "0.0"
+    t.datetime "created_at", null: false
+    t.datetime "updated_at", null: false
+    t.index ["client_ref"], name: "index_trading_positions_on_client_ref", unique: true
+    t.index ["entry_time"], name: "index_trading_positions_on_entry_time"
+    t.index ["instrument_id", "status"], name: "index_trading_positions_on_instrument_id_and_status"
+    t.index ["instrument_id"], name: "index_trading_positions_on_instrument_id"
+    t.index ["status", "entry_time"], name: "index_trading_positions_on_status_and_entry_time"
+    t.index ["strategy", "status"], name: "index_trading_positions_on_strategy_and_status"
+  end
+
   add_foreign_key "derivatives", "instruments"
+  add_foreign_key "trading_positions", "instruments"
 end
