@@ -4,7 +4,7 @@ module Regime
   class ChopDetector
     # Any 2 true ⇒ choppy
     # cs5/cs15 are CandleSeries instances (5m/15m) you already have.
-    def self.choppy_pre_entry?(cs5, cs15, opts = {})
+    def self.choppy_pre_entry?(cs5, _cs15, opts = {})
       adx_th    = (opts[:adx_min] || 18).to_i
       atr_mult  = (opts[:atr_quiet_mult] || 0.8).to_f
       cross_win = (opts[:vwap_cross_window] || 30).to_i

@@ -19,7 +19,7 @@ module Execution
       @quantity         = quantity.to_i
       @entry_price      = entry_price.to_f
       @policy           = policy
-      @placed_with_super_order = !!placed_with_super_order
+      @placed_with_super_order = !placed_with_super_order.nil?
       @product_type = product_type&.to_s
 
       raise ArgumentError, 'only BUY options supported' unless @side == 'BUY'

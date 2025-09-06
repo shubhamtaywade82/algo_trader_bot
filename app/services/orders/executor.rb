@@ -65,7 +65,7 @@ module Orders
                                             prod: 'INTRADAY'),
           ts: Time.zone.now
         }.compact
-        State::OrderCache.put!(@client_ref, order_hash)
+        State::OrderCache.store!(@client_ref, order_hash)
 
         # 5) Bump PositionCache (optimistic)
         bump_position_cache!(order_hash)

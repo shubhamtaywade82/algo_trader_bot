@@ -8,7 +8,8 @@ module Option
       # ------------- gates -------------
       def iv_rank_min        = Setting.fetch_f('opt.iv_rank_min', 0.00)
       def iv_rank_max        = Setting.fetch_f('opt.iv_rank_max', 0.80)
-      def theta_avoid_hour   = Setting.fetch_f('opt.theta_avoid_hour', 14.5) # 2:30pm
+      # 2:30pm
+      def theta_avoid_hour   = Setting.fetch_f('opt.theta_avoid_hour', 14.5)
       def min_adx            = Setting.fetch_f('opt.min_adx', 25.0)
 
       # ------------- ranking -----------

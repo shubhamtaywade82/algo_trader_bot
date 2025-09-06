@@ -249,7 +249,7 @@ module Option
     def collect_side_ivs(side)
       @option_chain[:oc].values.filter_map do |row|
         v = row.dig(side.to_s, 'implied_volatility')
-        v.to_f if v && v.to_f > 0
+        v.to_f if v&.to_f&.positive?
       end
     end
 
@@ -262,7 +262,7 @@ module Option
 
       rets = []
       closes.each_cons(2) do |a, b|
-        rets << Math.log(b.to_f / a.to_f)
+        rets << Math.log(b.to_f / a)
       rescue StandardError
         rets << 0
       end

@@ -3,11 +3,11 @@ module MarketCalendar
     # Add static or API-fetched holiday dates here
     Date.new(2025, 8, 15)
     # ...
-  ]
+  ].freeze
 
   def self.trading_day?(date)
     weekday = date.on_weekday?
-    !MARKET_HOLIDAYS.include?(date) && weekday
+    MARKET_HOLIDAYS.exclude?(date) && weekday
   end
 
   def self.last_trading_day(from: Time.zone.today)

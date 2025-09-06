@@ -25,6 +25,7 @@ module Http
         headers['X-LLM-AGENT-KEY'] = ENV['LLM_AGENT_KEY'] if ENV['LLM_AGENT_KEY'].present?
         res = conn.post('/signal', { context: context, user: user }, headers)
         raise "LLM agent HTTP #{res.status}: #{res.body}" unless res.success?
+
         body = res.body.is_a?(String) ? JSON.parse(res.body) : res.body
         body.fetch('plan')
       end

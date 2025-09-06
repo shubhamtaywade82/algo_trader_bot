@@ -151,7 +151,7 @@ module Runner
         decision = Risk::Gatekeeper.evaluate(plan: plan, facts: { iv_percentile: ivp })
         if decision.intent == :enter
           Orders::Flow.place_from_plan(plan)
-          notify_step(:placed, @demo ? "DEMO: would place BUY via LLM" : 'order placed')
+          notify_step(:placed, @demo ? 'DEMO: would place BUY via LLM' : 'order placed')
         else
           notify_step(:gate_llm, "skip: #{decision.reason}")
         end
@@ -200,7 +200,7 @@ module Runner
       notify_failure(e, :process_symbol)
     end
 
-    def rr_for(inst, leg, series)
+    def rr_for(_inst, leg, series)
       # ATR% → map to SL/TP/trail like your AlertProcessors did
       atr = begin
         series.atr(20)
@@ -262,7 +262,7 @@ module Runner
       end
     end
 
-    def register_for_management(order, underlying, side:)
+    def register_for_management(order, underlying, _side:)
       # Attach into PositionGuard
       intent = {
         security_id: order.instrument.security_id,

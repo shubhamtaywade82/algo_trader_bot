@@ -23,7 +23,15 @@ env :PATH, ENV.fetch('PATH', nil)
 
 # Start scalping session every weekday at 09:15 IST
 every :weekday, at: '9:15 am' do
-  runner %(ScalpSessionRunnerJob.perform_later(date: Date.current, capital: 100000.0, max_day_loss: 3000.0, roster: ["NIFTY","BANKNIFTY"], risk_rupees: 600.0))
+  runner %(
+    ScalpSessionRunnerJob.perform_later(
+      date: Date.current,
+      capital: 100_000.0,
+      max_day_loss: 3000.0,
+      roster: %w[NIFTY BANKNIFTY],
+      risk_rupees: 600.0
+    )
+  )
 end
 
 # Safety stop at 15:25 IST

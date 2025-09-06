@@ -9,15 +9,13 @@ module Risk
       return Decision.new(intent: :noop, reason: 'daily max loss') if PnL::Limits.daily_loss_breached?
 
       max_iv = plan.dig('filters', 'max_iv_percentile')
-      if max_iv && facts[:iv_percentile].to_f > max_iv.to_f
-        return Decision.new(intent: :noop, reason: 'IV%>cap')
-      end
+      return Decision.new(intent: :noop, reason: 'IV%>cap') if max_iv && facts[:iv_percentile].to_f > max_iv.to_f
 
       Decision.new(intent: :enter, reason: 'ok')
     end
 
     def self.within_entry_window?
-      cutoff = (ENV['ENTRY_CUTOFF'] || '15:20')
+      cutoff = ENV['ENTRY_CUTOFF'] || '15:20'
       Time.zone.now.strftime('%H:%M') <= cutoff
     end
   end

@@ -23,7 +23,7 @@ module Risk
     # Returns [allowed(Boolean), reason(String)]
     # expected_risk_rupees: how much you'd risk if this entry is placed (use per_trade_risk_rupees)
     # seg/sid: instrument identifiers for staleness check
-    def allow_entry?(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
+    def allow_entry(expected_risk_rupees:, seg:, sid:, max_tick_age: DEFAULT_MAX_TICK_AGE)
       return [false, 'trading_disabled'] unless trading_enabled?
 
       return [false, 'ticks_stale'] if stale?(seg:, sid:, max_age: max_tick_age)
