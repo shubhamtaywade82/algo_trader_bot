@@ -81,7 +81,7 @@ Built in **Ruby on Rails**, this bot is designed to:
 * PostgreSQL or SQLite
 * Environment variables:
 
-  * `DHANHQ_CLIENT_ID`, `DHANHQ_ACCESS_TOKEN`
+  * `CLIENT_ID`, `ACCESS_TOKEN` (DhanHQ API credentials)
   * `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 
 ### 1. Clone & Install
@@ -108,6 +108,16 @@ Instrument.create!(symbol: 'RELIANCE', segment: 'equity', exchange: 'NSE', watch
 ```bash
 rails runner 'AlgoRunner.execute_all'
 ```
+
+### 3b. (Optional) Verify WebSocket Feed
+
+Ensure `CLIENT_ID` and `ACCESS_TOKEN` are exported, then run:
+
+```bash
+bundle exec rake "ws:check[IDX_I,13,quote,15]"
+```
+
+This opens a short-lived DhanHQ WebSocket session, subscribes to NIFTY (`IDX_I`, security id `13`), and reports whether a tick arrives within 15 seconds. Override the defaults with `WS_CHECK_*` environment variables if you prefer not to pass rake arguments.
 
 ### 4. Schedule with Cron / Sidekiq
 
