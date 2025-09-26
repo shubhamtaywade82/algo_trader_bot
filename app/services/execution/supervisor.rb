@@ -13,7 +13,7 @@ module Execution
     def boot!
       reconcile_open_positions!
 
-      @reconciler_task ||= Concurrent::TimerTask.new(execution_interval: 60) do
+      @boot ||= Concurrent::TimerTask.new(execution_interval: 60) do
         reconcile_open_positions!
       end.tap(&:execute)
 
@@ -89,8 +89,6 @@ module Execution
                   p.product_type
                 elsif p.respond_to?(:productType)
                   p.productType
-                else
-                  nil
                 end
 
         attrs = {
@@ -99,7 +97,7 @@ module Execution
           side: 'BUY',
           quantity: qty,
           entry_price: entry,
-          placed_with_super_order: p.respond_to?(:super_order?) ? !!p.super_order? : false,
+          placed_with_super_order: p.respond_to?(:super_order?) ? !p.super_order?.nil? : false,
           product_type: ptype
         }
         register_position!(attrs)
@@ -119,7 +117,7 @@ module Execution
         quantity: attrs[:quantity].to_i,
         entry_price: attrs[:entry_price].to_f,
         policy: Execution::RiskPolicy.load,
-        placed_with_super_order: !!attrs[:placed_with_super_order],
+        placed_with_super_order: !attrs[:placed_with_super_order].nil?,
         product_type: attrs[:product_type]
       )
     end

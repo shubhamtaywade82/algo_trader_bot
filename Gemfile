@@ -59,6 +59,15 @@ group :development, :test do
   gem 'rubocop-rspec_rails', require: false
 
   gem 'dotenv-rails'
+  
+  # Testing gems
+  gem 'factory_bot_rails'
+  gem 'faker'
+  gem 'simplecov', require: false
+  gem 'database_cleaner-active_record'
+  gem 'webmock'
+  gem 'vcr'
+  gem 'shoulda-matchers'
 end
 
 group :development do
@@ -70,6 +79,8 @@ gem 'activerecord-import'
 gem 'csv', require: false
 gem 'daemons'
 gem 'delayed_job_active_record'
+gem 'faraday', '~> 1.10'
+gem 'faraday-retry', '~> 1.0'
 gem 'ruby-openai'
 gem 'ruby-technical-analysis'
 gem 'technical-analysis'

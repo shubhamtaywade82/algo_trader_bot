@@ -37,7 +37,7 @@ module Orders
           status: 'MODIFIED',
           ts: Time.zone.now
         )
-        State::OrderCache.put!(@client_ref, merged)
+        State::OrderCache.store!(@client_ref, merged)
       end
       ok
     end

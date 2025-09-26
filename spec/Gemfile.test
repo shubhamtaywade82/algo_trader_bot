@@ -1,0 +1,17 @@
+# frozen_string_literal: true
+
+# Test dependencies for algo_trader_bot
+group :test do
+  gem 'rspec-rails', '~> 6.0'
+  gem 'factory_bot_rails', '~> 6.4'
+  gem 'shoulda-matchers', '~> 5.3'
+  gem 'database_cleaner-active_record', '~> 2.1'
+  gem 'webmock', '~> 3.19'
+  gem 'vcr', '~> 6.1'
+  gem 'simplecov', '~> 0.22', require: false
+  gem 'simplecov-json', '~> 0.2'
+  gem 'faker', '~> 3.2'
+  gem 'timecop', '~> 0.9'
+  gem 'rspec-mocks', '~> 3.12'
+  gem 'rspec-expectations', '~> 3.12'
+end
