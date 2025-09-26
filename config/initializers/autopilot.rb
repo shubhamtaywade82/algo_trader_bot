@@ -30,6 +30,6 @@ at_exit do
   if Rails.application.config.respond_to?(:autopilot_manager) &&
      Rails.application.config.autopilot_manager&.running?
     Rails.logger.info('[Autopilot] Shutting down autopilot service...')
-    Rails.application.config.autopilot_manager.stop
+    Rails.application.config.autopilot_manager.stop!
   end
 end

@@ -1,0 +1,27 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Test runner for algo_trader_bot
+require 'bundler/setup'
+require 'rspec/core'
+
+# Load SimpleCov
+require_relative '../spec/support/simplecov'
+
+# Set test environment
+ENV['RAILS_ENV'] = 'test'
+
+# Load Rails
+require_relative '../config/environment'
+
+# Configure RSpec
+RSpec.configure do |config|
+  config.color = true
+  config.tty = true
+  config.formatter = :documentation
+  config.fail_fast = true
+  config.order = :random
+end
+
+# Run tests
+RSpec::Core::Runner.run(ARGV)

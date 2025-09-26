@@ -1,0 +1,110 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Comprehensive test runner for algo_trader_bot
+require 'bundler/setup'
+require 'colorize'
+
+class TestRunner
+  def initialize
+    @start_time = Time.current
+    @results = {}
+  end
+
+  def run_all_tests
+    puts "🚀 Starting comprehensive test suite for algo_trader_bot".cyan.bold
+    puts "=" * 60
+
+    run_test_suite('Unit Tests', 'spec/services/**/*_spec.rb')
+    run_test_suite('Model Tests', 'spec/models/**/*_spec.rb')
+    run_test_suite('Request Tests', 'spec/requests/**/*_spec.rb')
+    run_test_suite('Integration Tests', 'spec/integration/**/*_spec.rb')
+    run_test_suite('Strategy Tests', 'spec/strategies/**/*_spec.rb')
+
+    print_summary
+  end
+
+  def run_test_suite(name, pattern)
+    puts "\n📋 Running #{name}...".yellow
+    puts "-" * 40
+
+    command = "bundle exec rspec #{pattern} --format documentation --color"
+    result = system(command)
+
+    @results[name] = result
+    status = result ? "✅ PASSED".green : "❌ FAILED".red
+    puts "\n#{name}: #{status}"
+  end
+
+  def run_coverage_tests
+    puts "\n📊 Running tests with coverage...".yellow
+    puts "-" * 40
+
+    command = "COVERAGE=true bundle exec rspec --format documentation --color"
+    result = system(command)
+
+    if result
+      puts "\n📈 Coverage report generated in coverage/index.html".green
+    else
+      puts "\n❌ Coverage tests failed".red
+    end
+  end
+
+  def run_specific_tests(type)
+    case type
+    when 'ai'
+      run_test_suite('AI Services', 'spec/services/ai/**/*_spec.rb')
+    when 'trading'
+      run_test_suite('Trading Services', 'spec/services/trading/**/*_spec.rb')
+    when 'position'
+      run_test_suite('Position Management', 'spec/services/position/**/*_spec.rb')
+    when 'risk'
+      run_test_suite('Risk Management', 'spec/services/risk/**/*_spec.rb')
+    when 'api'
+      run_test_suite('API Endpoints', 'spec/requests/**/*_spec.rb')
+    else
+      puts "❌ Unknown test type: #{type}".red
+      puts "Available types: ai, trading, position, risk, api"
+    end
+  end
+
+  private
+
+  def print_summary
+    puts "\n" + "=" * 60
+    puts "📊 TEST SUMMARY".cyan.bold
+    puts "=" * 60
+
+    @results.each do |name, result|
+      status = result ? "✅ PASSED".green : "❌ FAILED".red
+      puts "#{name.ljust(20)}: #{status}"
+    end
+
+    total_passed = @results.values.count(true)
+    total_tests = @results.size
+    duration = Time.current - @start_time
+
+    puts "\nTotal: #{total_passed}/#{total_tests} test suites passed"
+    puts "Duration: #{duration.round(2)} seconds"
+
+    if total_passed == total_tests
+      puts "\n🎉 All tests passed!".green.bold
+      exit 0
+    else
+      puts "\n💥 Some tests failed!".red.bold
+      exit 1
+    end
+  end
+end
+
+# Main execution
+if ARGV.empty?
+  runner = TestRunner.new
+  runner.run_all_tests
+elsif ARGV[0] == 'coverage'
+  runner = TestRunner.new
+  runner.run_coverage_tests
+else
+  runner = TestRunner.new
+  runner.run_specific_tests(ARGV[0])
+end

@@ -59,6 +59,15 @@ group :development, :test do
   gem 'rubocop-rspec_rails', require: false
 
   gem 'dotenv-rails'
+  
+  # Testing gems
+  gem 'factory_bot_rails'
+  gem 'faker'
+  gem 'simplecov', require: false
+  gem 'database_cleaner-active_record'
+  gem 'webmock'
+  gem 'vcr'
+  gem 'shoulda-matchers'
 end
 
 group :development do

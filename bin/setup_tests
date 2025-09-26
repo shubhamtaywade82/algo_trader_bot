@@ -1,0 +1,87 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Test setup script for algo_trader_bot
+require 'bundler/setup'
+require 'colorize'
+
+class TestSetup
+  def initialize
+    @start_time = Time.current
+  end
+
+  def setup_all
+    puts "🔧 Setting up comprehensive test environment for algo_trader_bot".cyan.bold
+    puts "=" * 70
+
+    install_gems
+    setup_database
+    create_test_configs
+    verify_setup
+
+    puts "\n✅ Test environment setup complete!".green.bold
+    puts "Run tests with: ./bin/run_tests".yellow
+  end
+
+  private
+
+  def install_gems
+    puts "\n📦 Installing test gems...".yellow
+    system('bundle install') || abort("❌ Bundle install failed".red)
+  end
+
+  def setup_database
+    puts "\n🗄️  Setting up test database...".yellow
+    
+    # Create test database
+    system('RAILS_ENV=test bundle exec rails db:create') || abort("❌ Test database creation failed".red)
+    
+    # Run migrations
+    system('RAILS_ENV=test bundle exec rails db:migrate') || abort("❌ Test database migration failed".red)
+    
+    # Load schema
+    system('RAILS_ENV=test bundle exec rails db:schema:load') || abort("❌ Test schema load failed".red)
+  end
+
+  def create_test_configs
+    puts "\n⚙️  Creating test configurations...".yellow
+    
+    # Create test directory structure
+    Dir.mkdir('spec') unless Dir.exist?('spec')
+    Dir.mkdir('spec/support') unless Dir.exist?('spec/support')
+    Dir.mkdir('spec/factories') unless Dir.exist?('spec/factories')
+    Dir.mkdir('spec/fixtures') unless Dir.exist?('spec/fixtures')
+    Dir.mkdir('coverage') unless Dir.exist?('coverage')
+    
+    puts "✅ Test directories created".green
+  end
+
+  def verify_setup
+    puts "\n🔍 Verifying test setup...".yellow
+    
+    # Check if RSpec is available
+    if system('bundle exec rspec --version')
+      puts "✅ RSpec is available".green
+    else
+      puts "❌ RSpec not available".red
+    end
+    
+    # Check if test database exists
+    if File.exist?('db/test.sqlite3')
+      puts "✅ Test database exists".green
+    else
+      puts "❌ Test database missing".red
+    end
+    
+    # Check if spec files exist
+    spec_files = Dir.glob('spec/**/*_spec.rb')
+    if spec_files.any?
+      puts "✅ Found #{spec_files.count} spec files".green
+    else
+      puts "❌ No spec files found".red
+    end
+  end
+end
+
+# Run setup
+TestSetup.new.setup_all

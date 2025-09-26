@@ -16,6 +16,13 @@ Rails.application.routes.draw do
     post :place_bracket_order, to: 'llm#place_bracket_order'
     post :modify_order,        to: 'llm#modify_order'
     post :cancel_order,        to: 'llm#cancel_order'
+
+    # AI Analysis endpoints
+    post :analyze_market, to: 'llm#analyze_market'
+    post :trading_recommendations, to: 'llm#trading_recommendations'
+    post :ai_decision,           to: 'llm#ai_decision'
+    get  :test_ai_connection,    to: 'llm#test_ai_connection'
+    post :custom_analysis,       to: 'llm#custom_analysis'
   end
 
   # Autopilot management endpoints
