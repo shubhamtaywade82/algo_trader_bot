@@ -16,8 +16,17 @@ class InstrumentsImporter
     # Public entry point
     # ------------------------------------------------------------
     def import_from_url
-      csv_text = fetch_csv_with_cache # ← NEW (was: URI.open(CSV_URL).read)
-      import_from_csv(csv_text)
+      started_at = Time.current
+      csv_text   = fetch_csv_with_cache # ← NEW (was: URI.open(CSV_URL).read)
+      summary    = import_from_csv(csv_text)
+
+      finished_at          = Time.current
+      summary[:started_at]  = started_at
+      summary[:finished_at] = finished_at
+      summary[:duration]    = finished_at - started_at
+
+      record_success!(summary)
+      summary
     end
 
     # ------------------------------------------------------------
@@ -55,8 +64,17 @@ class InstrumentsImporter
       # instruments_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
       # derivatives_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
 
-      import_instruments!(instruments_rows)  unless instruments_rows.empty?
-      import_derivatives!(derivatives_rows)  unless derivatives_rows.empty?
+      instrument_import = instruments_rows.empty? ? nil : import_instruments!(instruments_rows)
+      derivative_import = derivatives_rows.empty? ? nil : import_derivatives!(derivatives_rows)
+
+      {
+        instrument_rows: instruments_rows.size,
+        derivative_rows: derivatives_rows.size,
+        instrument_upserts: instrument_import&.ids&.size.to_i,
+        derivative_upserts: derivative_import&.ids&.size.to_i,
+        instrument_total: Instrument.count,
+        derivative_total: Derivative.count
+      }
     end
 
     private
@@ -134,7 +152,7 @@ class InstrumentsImporter
     # 3. Upsert instruments
     # ------------------------------------------------------------
     def import_instruments!(rows)
-      res = Instrument.import(
+      Instrument.import(
         rows,
         batch_size: BATCH_SIZE,
         on_duplicate_key_update: {
@@ -144,8 +162,9 @@ class InstrumentsImporter
             underlying_symbol lot_size tick_size updated_at
           ]
         }
-      )
-      Rails.logger.info "Upserted Instruments: #{res.ids.size}"
+      ).tap do |res|
+        Rails.logger.info "Upserted Instruments: #{res.ids.size}"
+      end
     end
 
     # ------------------------------------------------------------
@@ -159,7 +178,7 @@ class InstrumentsImporter
 
       return if with_parent.empty?
 
-      res = Derivative.import(
+      Derivative.import(
         with_parent,
         batch_size: BATCH_SIZE,
         on_duplicate_key_update: {
@@ -169,8 +188,9 @@ class InstrumentsImporter
             underlying_symbol series lot_size tick_size updated_at
           ]
         }
-      )
-      Rails.logger.info "Upserted Derivatives: #{res.ids.size}"
+      ).tap do |res|
+        Rails.logger.info "Upserted Derivatives: #{res.ids.size}"
+      end
     end
 
     # ------------------------------------------------------------
@@ -225,6 +245,17 @@ class InstrumentsImporter
     def map_segment(char)
       { 'I' => 'index', 'E' => 'equity', 'C' => 'currency',
         'D' => 'derivatives', 'M' => 'commodity' }[char] || char.downcase
+    end
+
+    def record_success!(summary)
+      Setting.put('instruments.last_imported_at', summary[:finished_at].iso8601)
+      Setting.put('instruments.last_import_duration_sec', summary[:duration].to_f.round(2))
+      Setting.put('instruments.last_instrument_rows', summary[:instrument_rows])
+      Setting.put('instruments.last_derivative_rows', summary[:derivative_rows])
+      Setting.put('instruments.last_instrument_upserts', summary[:instrument_upserts])
+      Setting.put('instruments.last_derivative_upserts', summary[:derivative_upserts])
+      Setting.put('instruments.instrument_total', summary[:instrument_total])
+      Setting.put('instruments.derivative_total', summary[:derivative_total])
     end
   end
 end
