@@ -40,3 +40,15 @@ namespace :instruments do
   desc 'Reimport (clear and import)'
   task reimport: %i[clear import]
 end
+
+# Provide aliases for legacy singular namespace usage.
+namespace :instrument do
+  desc 'Alias for instruments:import'
+  task import: 'instruments:import'
+
+  desc 'Alias for instruments:clear'
+  task clear: 'instruments:clear'
+
+  desc 'Alias for instruments:reimport'
+  task reimport: 'instruments:reimport'
+end

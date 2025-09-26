@@ -49,7 +49,9 @@ class InstrumentsImporter
 
     def import_from_csv(csv_content)
       instruments_rows, derivatives_rows = build_batches(csv_content)
-      Rails.logger.debug instruments_rows.size, derivatives_rows.size
+      Rails.logger.debug do
+        "instrument rows: #{instruments_rows.size}; derivative rows: #{derivatives_rows.size}"
+      end
       # instruments_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
       # derivatives_rows.uniq!  { |r| r.values_at(:security_id, :symbol_name, :exchange, :segment) }
 
