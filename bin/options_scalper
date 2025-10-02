@@ -1,0 +1,124 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+ENV['RAILS_LOG_TO_STDOUT'] = 'true'
+
+require_relative '../config/environment'
+require 'yaml'
+
+module OptionsScalper
+  ALLOWED_UNDERLYINGS = %w[NIFTY BANKNIFTY SENSEX].freeze
+
+  module_function
+
+  def run
+    Rails.application.eager_load!
+    $stdout.sync = true
+    stdout_logger = Logger.new($stdout)
+    stdout_logger.level = Logger::INFO
+    stdout_logger.formatter = Logger::Formatter.new
+    tagged = ActiveSupport::TaggedLogging.new(stdout_logger)
+    Rails.logger = tagged
+    ActiveRecord::Base.logger = tagged
+    ActiveSupport::LogSubscriber.logger = tagged
+    Rails.logger.info('[OptionsScalper] Booting...')
+
+    config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.options.yml'))
+    config = YAML.load_file(config_path).deep_symbolize_keys
+    shared_cfg = config[:shared] || {}
+    options_cfg = config[:options] || {}
+    resolver = Instruments::Resolver.new
+
+    infra = Scalpers::Base::Infra.new(shared_cfg)
+    watchlist = prepare_watchlist(options_cfg[:watchlist], resolver: resolver)
+
+    if watchlist.empty?
+      Rails.logger.warn('[OptionsScalper] No instruments resolved from watchlist. Skipping run.')
+      return
+    end
+
+    feed_runner = Feed::Runner.new(watchlist: watchlist)
+    bars_loop = Bars::FetchLoop.new(
+      watchlist: watchlist,
+      infra: infra,
+      poll_interval: options_cfg[:bars_poll_interval] || 45,
+      intervals: options_cfg[:intervals] || %w[1 5]
+    )
+
+    scalper_runner = Scalpers::Options::Runner.new(
+      infra: infra,
+      watchlist: watchlist,
+      logger: Rails.logger,
+      poll_interval: options_cfg[:poll_interval] || 20,
+      idempotency_ttl: options_cfg[:idempotency_ttl] || 90,
+      cash_balance: options_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital),
+      demo_mode: demo_mode?(options_cfg, shared_cfg)
+    )
+
+    feed_runner.start!
+    bars_loop.start!
+
+    trap('INT') { shutdown(feed_runner, bars_loop, scalper_runner) }
+    trap('TERM') { shutdown(feed_runner, bars_loop, scalper_runner) }
+
+    scalper_runner.start!
+
+    sleep
+  end
+
+  def prepare_watchlist(rows, resolver: Instruments::Resolver.new)
+    Array(rows).filter_map do |row|
+      cfg = row.to_h.deep_symbolize_keys
+      hints = Instruments::Resolver::INDEX_ALIASES[normalize_symbol(cfg[:symbol])]
+      instrument = resolver.call(
+        symbol: cfg[:symbol],
+        exchange: cfg[:exchange] || hints&.dig(:exchange),
+        segment: cfg[:segment] || hints&.dig(:segment) || :index,
+        security_id: cfg[:security_id]
+      )
+      unless instrument
+        Rails.logger.warn("[OptionsScalper] Instrument not found: #{cfg[:symbol]}")
+        next
+      end
+
+      unless allowed_underlying?(instrument)
+        Rails.logger.warn("[OptionsScalper] Unsupported underlying for options lane: #{instrument.symbol_name}")
+        next
+      end
+
+      cfg[:instrument] = instrument
+      cfg[:symbol] = instrument.symbol_name
+      cfg
+    end
+  end
+
+  def allowed_underlying?(instrument)
+    code = normalize_symbol(instrument.symbol_name) || normalize_symbol(instrument.display_name)
+    ALLOWED_UNDERLYINGS.include?(code)
+  end
+
+  def normalize_symbol(value)
+    value.to_s.upcase.delete(' ')
+  end
+
+
+  def shutdown(feed_runner, bars_loop, scalper_runner)
+    Rails.logger.info('[OptionsScalper] Shutting down...')
+    scalper_runner.stop!
+    feed_runner.stop!
+    bars_loop.stop!
+  end
+
+  def demo_mode?(lane_cfg, shared_cfg)
+    env_demo = ENV.fetch('ENABLE_OPTIONS_SCALPER', '').casecmp?('demo') || truthy?(ENV['OPTIONS_SCALPER_DEMO'])
+    config_demo = lane_cfg[:demo_mode]
+    shared_demo = shared_cfg[:demo_mode]
+    env_demo || config_demo || shared_demo
+  end
+
+  def truthy?(value)
+    %w[1 true yes on].include?(value.to_s.strip.downcase)
+  end
+end
+
+OptionsScalper.run

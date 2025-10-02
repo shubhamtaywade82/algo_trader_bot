@@ -1,10 +1,11 @@
 # 📈 AlgoTradingBot (Rails-based)
 
-An advanced, modular, event-driven algorithmic trading bot for **Options Buying** using **DhanHQ APIs**, **technical indicators**, **Telegram alerts**, and **AI-assisted strategy reasoning**.
+An advanced, modular, event-driven algorithmic trading bot for **Options Buying** and **equity scalping** using **DhanHQ APIs**, **technical indicators**, **Telegram alerts**, and **AI-assisted strategy reasoning**.
 
 Built in **Ruby on Rails**, this bot is designed to:
 
 * Identify CE/PE entries using technical + price action strategies
+* Run a two-lane intraday scalper (stocks + index options) on the same shared core
 * Analyze option chains with IV, OI, Greeks, and smart filters
 * Place Super Orders (SL/TP/Trailing) using DhanHQ
 * Send real-time trade updates via Telegram
@@ -57,8 +58,9 @@ Built in **Ruby on Rails**, this bot is designed to:
 ### 🔁 Automation & Scheduling
 
 * `AlgoRunner` executes all watchlisted instruments every 5 minutes
-* Smart CE/PE selection per signal
-* Auto-skip if no signal or no affordable strike
+* Dedicated two-lane scalper runners (`bin/stock_scalper`, `bin/options_scalper`) backed by a shared engine
+* Smart CE/PE selection per signal and liquidity-aware chain picking
+* Auto-skip if no signal, liquidity fails, or rate limits kick in
 * Sidekiq / Whenever-compatible runners
 
 ### 🧠 AI Integration (Optional)
@@ -109,6 +111,32 @@ Instrument.create!(symbol: 'RELIANCE', segment: 'equity', exchange: 'NSE', watch
 rails runner 'AlgoRunner.execute_all'
 ```
 
+### 3a. Launch the Intraday Scalpers
+
+Both scalpers share the same data/risk core. Edit the YAML config or provide your own via `SCALPER_CONFIG`.
+
+```bash
+bundle exec ruby bin/stock_scalper      # Equity scalper lane
+bundle exec ruby bin/options_scalper    # Index options scalper lane
+```
+
+Each launcher spins up a Dhan WebSocket feed, the staggered 1m/5m bar fetch loop, and the lane-specific runner.
+
+#### Capability Matrix
+
+| Lane   | Universe                          | Direction     | Order Type          | Sizing                              | Default SL / TP |
+|--------|-----------------------------------|---------------|---------------------|-------------------------------------|-----------------|
+| Stocks | Watchlisted NSE equities          | Long & Short  | Bracket (market)    | ≤1% risk per trade, max 5× leverage | ~1% / +2%       |
+| Options | NIFTY/BANKNIFTY/SENSEX weekly ATM | CE/PE buying  | Bracket (market)    | ≤1% cash premium budget             | ~30% / +60%     |
+
+The shared core covers the WebSocket feed → LTP cache, 1m/5m OHLC fetch → bars cache, the signal engine (Supertrend + BOS +
+regime), guardrails (session/day-down/losers/cooldown), rate-limit token bucket with backoff, and base sizing helpers.
+
+Lane-specific modules wire their own policy/sizer/executor logic on top:
+
+* **Stocks** – spread filter, leverage-aware equity sizing, long/short bracket execution with ~1% SL / +2% TP targets.
+* **Options** – direction → CE/PE mapping, liquidity-aware chain picker, premium-budget sizing, and 30%/60% SL/TP brackets.
+
 ### 3b. (Optional) Verify WebSocket Feed
 
 Ensure `CLIENT_ID` and `ACCESS_TOKEN` are exported, then run:
@@ -129,6 +157,10 @@ This opens a short-lived DhanHQ WebSocket session, subscribes to NIFTY (`IDX_I`,
 
 ```
 app/
+├── scalpers/
+│   ├── base/ (engine, risk profile, sizing, DI, shared runner)
+│   ├── stocks/ (policy, sizer, executor, runner)
+│   └── options/ (chain picker, policy, sizer, executor, runner)
 ├── models/
 │   ├── instrument.rb
 │   ├── concerns/instrument_helpers.rb
@@ -137,6 +169,7 @@ app/
 │
 ├── services/
 │   ├── application_service.rb
+│   ├── bars/ (intraday fetch loop)
 │   ├── indicators/
 │   │   └── calculator.rb
 │   ├── strategies/
@@ -146,6 +179,9 @@ app/
 │   │   └── smart_money_concepts.rb
 │   ├── option/
 │   │   └── chain_analyzer.rb
+│   ├── feed/runner.rb (Dhan WS glue)
+│   ├── rate_limiter/ (token bucket + backoff)
+│   ├── stores/ (LTP + bars caches for scalpers)
 │   └── execution/
 │       └── order_executor.rb
 │

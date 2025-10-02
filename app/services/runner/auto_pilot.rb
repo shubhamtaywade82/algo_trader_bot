@@ -36,6 +36,7 @@ module Runner
         allocation_pct: ENV.fetch('ALLOC_PCT', '0.30')
       )
       @last_entry_at = {}
+      @scalper_infra = nil
     end
 
     def call
@@ -90,11 +91,9 @@ module Runner
           end
         end
       else
-        Bars::FetchLoop.start(symbols: @roster, timeframe: tf_for(@mode.tf)) do |sym, series|
+        fetch_live_series.each do |sym, series|
           process_symbol(sym, series)
         end
-        sleep 12
-        Bars::FetchLoop.stop
       end
     end
 
@@ -285,6 +284,37 @@ module Runner
 
     def fetch_instrument(sym)
       Instrument.segment_index.find_by(symbol_name: sym) || Instrument.segment_equity.find_by(display_name: sym)
+    end
+
+    def fetch_live_series
+      tf = tf_for(@mode.tf)
+      @roster.filter_map do |sym|
+        instrument = fetch_instrument(sym)
+        unless instrument
+          notify_step(:fetch, "instrument not found for #{sym}")
+          next
+        end
+
+        raw = scalper_infra.with_api_guard do
+          instrument.intraday_ohlc(interval: tf, days: 5)
+        end
+
+        if raw.present?
+          series = CandleSeries.new(symbol: instrument.symbol_name, interval: tf)
+          series.load_from_raw(raw)
+          [sym, series]
+        else
+          notify_step(:fetch, "no OHLC for #{sym}")
+          nil
+        end
+      rescue StandardError => e
+        notify_step(:fetch, "error fetching #{sym}: #{e.message}")
+        nil
+      end
+    end
+
+    def scalper_infra
+      @scalper_infra ||= Scalpers::Base::Infra.new
     end
 
     def risk_ok?(inst, expected_risk_rupees:)

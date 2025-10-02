@@ -1,0 +1,106 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+ENV['RAILS_LOG_TO_STDOUT'] = 'true'
+
+require_relative '../config/environment'
+require 'yaml'
+
+module StockScalper
+  module_function
+
+  def run
+    Rails.application.eager_load!
+    $stdout.sync = true
+    stdout_logger = Logger.new($stdout)
+    stdout_logger.level = Logger::INFO
+    stdout_logger.formatter = Logger::Formatter.new
+    tagged = ActiveSupport::TaggedLogging.new(stdout_logger)
+    Rails.logger = tagged
+    ActiveRecord::Base.logger = tagged
+    ActiveSupport::LogSubscriber.logger = tagged
+    Rails.logger.info('[StockScalper] Booting...')
+
+    config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.stocks.yml'))
+    config = YAML.load_file(config_path).deep_symbolize_keys
+    shared_cfg = config[:shared] || {}
+    stocks_cfg = config[:stocks] || {}
+    resolver = Instruments::Resolver.new
+
+    infra = Scalpers::Base::Infra.new(shared_cfg)
+    watchlist = prepare_watchlist(stocks_cfg[:watchlist], resolver: resolver)
+
+    if watchlist.empty?
+      Rails.logger.warn('[StockScalper] No instruments resolved from watchlist. Skipping run.')
+      return
+    end
+
+    feed_runner = Feed::Runner.new(watchlist: watchlist)
+    bars_loop = Bars::FetchLoop.new(
+      watchlist: watchlist,
+      infra: infra,
+      poll_interval: stocks_cfg[:bars_poll_interval] || 45,
+      intervals: stocks_cfg[:intervals] || %w[1 5]
+    )
+
+    scalper_runner = Scalpers::Stocks::Runner.new(
+      infra: infra,
+      watchlist: watchlist,
+      logger: Rails.logger,
+      poll_interval: stocks_cfg[:poll_interval] || 20,
+      idempotency_ttl: stocks_cfg[:idempotency_ttl] || 120,
+      cash_balance: stocks_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital),
+      demo_mode: demo_mode?(stocks_cfg, shared_cfg)
+    )
+
+    feed_runner.start!
+    bars_loop.start!
+
+    trap('INT') { shutdown(feed_runner, bars_loop, scalper_runner) }
+    trap('TERM') { shutdown(feed_runner, bars_loop, scalper_runner) }
+
+    scalper_runner.start!
+
+    sleep
+  end
+
+  def prepare_watchlist(rows, resolver: Instruments::Resolver.new)
+    Array(rows).filter_map do |row|
+      cfg = row.to_h.deep_symbolize_keys
+      instrument = resolver.call(
+        symbol: cfg[:symbol],
+        exchange: cfg.fetch(:exchange, :nse),
+        segment: cfg[:segment] || :equity,
+        security_id: cfg[:security_id]
+      )
+      unless instrument
+        Rails.logger.warn("[StockScalper] Instrument not found: #{cfg[:symbol]}")
+        next
+      end
+
+      cfg[:instrument] = instrument
+      cfg[:symbol] = instrument.symbol_name
+      cfg
+    end
+  end
+
+  def shutdown(feed_runner, bars_loop, scalper_runner)
+    Rails.logger.info('[StockScalper] Shutting down...')
+    scalper_runner.stop!
+    feed_runner.stop!
+    bars_loop.stop!
+  end
+
+  def demo_mode?(lane_cfg, shared_cfg)
+    env_demo = ENV.fetch('ENABLE_STOCK_SCALPER', '').casecmp?('demo') || truthy?(ENV['STOCK_SCALPER_DEMO'])
+    config_demo = lane_cfg[:demo_mode]
+    shared_demo = shared_cfg[:demo_mode]
+    env_demo || config_demo || shared_demo
+  end
+
+  def truthy?(value)
+    %w[1 true yes on].include?(value.to_s.strip.downcase)
+  end
+end
+
+StockScalper.run

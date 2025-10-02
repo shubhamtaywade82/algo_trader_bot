@@ -1,65 +1,102 @@
 # frozen_string_literal: true
 
+require 'concurrent'
+
 module Bars
+  # Periodically refreshes intraday bars (1m/5m) for the scalper watchlist.
   class FetchLoop
-    class << self
-      def start(symbols:, timeframe: '1m', &on_series)
-        stop
-        @running = true
-        @thread = Thread.new do
-          while @running
-            begin
-              tick = Time.current
-              symbols.each do |sym|
-                inst = Instrument.segment_index.find_by(symbol_name: sym) || Instrument.segment_equity.find_by(display_name: sym)
-                next unless inst
+    DEFAULTS = {
+      poll_interval: 60,
+      stagger_delay: 0.25,
+      max_candles: 180,
+      intervals: %w[1 5]
+    }.freeze
 
-                raw = inst.intraday_ohlc(interval: interval_for(timeframe), days: 20)
-                next if raw.blank?
+    def initialize(watchlist:, infra:, bars_cache: Stores::BarsCache.instance, logger: Rails.logger, **opts)
+      @watchlist = Array(watchlist)
+      @infra = infra
+      @bars_cache = bars_cache
+      @logger = logger
+      @config = DEFAULTS.merge(opts.deep_symbolize_keys)
+      @running = Concurrent::AtomicBoolean.new(false)
+      @thread = nil
+      @auth_failure = Concurrent::AtomicBoolean.new(false)
+    end
 
-                series = CandleSeries.new(symbol: inst.symbol_name, interval: interval_for(timeframe))
-                series.load_from_raw(raw)
-                on_series&.call(sym, series)
-              end
-            rescue StandardError => e
-              Rails.logger.error("[Bars::FetchLoop] #{e.class}: #{e.message}")
-            ensure
-              sleep sleep_to_next_bar(timeframe, from: tick)
-            end
-          end
+    def start!
+      return self if @running.true?
+
+      @running.make_true
+      @thread = Thread.new { loop_body }
+      self
+    end
+
+    def stop!
+      @running.make_false
+      @thread&.join(1)
+      @thread = nil
+      self
+    end
+
+    private
+
+    def loop_body
+      while @running.true?
+        fetch_cycle
+        sleep(@config[:poll_interval].to_f)
+      end
+    rescue StandardError => e
+      @logger.error("[Bars::FetchLoop] crashed: #{e.message}")
+      retry if @running.true?
+    end
+
+    def fetch_cycle
+      @watchlist.each do |entry|
+        instrument = entry[:instrument]
+        next unless instrument
+
+        refreshed = []
+        @config[:intervals].each do |interval|
+          refreshed << interval if fetch_and_store(instrument, interval)
+          sleep(@config[:stagger_delay].to_f)
         end
-      end
 
-      def stop
-        @running = false
-        @thread&.kill
-        @thread = nil
-      end
+        next if refreshed.empty?
 
-      private
-
-      def interval_for(tf)
-        case tf.to_s
-        when '1m' then '1'
-        when '3m' then '3'
-        when '5m' then '5'
-        when '15m' then '15'
-        else '1'
-        end
+        @logger.info(
+          "[Bars::FetchLoop] refreshed #{instrument.symbol_name} intervals=#{refreshed.join(',')}"
+        )
       end
+    end
 
-      def sleep_to_next_bar(tf, from:)
-        secs = case tf.to_s
-               when '1m'  then 60
-               when '3m'  then 180
-               when '5m'  then 300
-               when '15m' then 900
-               else 60
-               end
-        drift  = (Time.current - from).to_f
-        remain = secs - (from.to_i % secs)
-        [remain + 2 - drift, 5].max
+    def fetch_and_store(instrument, interval)
+      response = @infra.with_api_guard do
+        instrument.intraday_ohlc(interval: interval, days: 5)
       end
+      return false unless response
+
+      series = CandleSeries.new(symbol: instrument.symbol_name, interval: interval)
+      series.load_from_raw(response)
+      series.candles.shift([series.candles.size - @config[:max_candles], 0].max)
+
+      @bars_cache.write(
+        segment: instrument.exchange_segment,
+        security_id: instrument.security_id,
+        interval: interval,
+        series: series
+      )
+      true
+    rescue Scalpers::Errors::InvalidCredentials => e
+      unless @auth_failure.true?
+        @auth_failure.make_true
+        @logger.error("[Bars::FetchLoop] #{instrument.symbol_name} invalid credentials: #{e.message}")
+      end
+      @infra.disable_trading!('invalid_credentials')
+      @running.make_false
+      false
+    rescue StandardError => e
+      @logger.warn("[Bars::FetchLoop] failed to fetch #{instrument.symbol_name} #{interval}m: #{e.message}")
+      false
     end
   end
 end

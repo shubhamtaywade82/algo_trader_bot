@@ -90,10 +90,12 @@ module InstrumentHelpers
     to_date ||= MarketCalendar.today_or_last_trading_day.to_s
     from_date ||= (Date.parse(to_date) - days).to_s # fetch last 5 sessions by default
 
+    instrument_code = resolve_instrument_code
+
     DhanHQ::Models::HistoricalData.intraday(
       security_id: security_id,
       exchange_segment: exchange_segment,
-      instrument: instrument_type,
+      instrument: instrument_code,
       interval: interval,
       oi: oi,
       from_date: from_date || (Time.zone.today - days).to_s,
@@ -101,14 +103,6 @@ module InstrumentHelpers
     )
   rescue StandardError => e
     Rails.logger.error("Failed to fetch Intraday OHLC for #{self.class.name} #{security_id}: #{e.message}")
-    nil
-  end
-
-  def depth
-    response = DhanHQ::Models::MarketFeed.quote(exch_segment_enum)
-    response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil
-  rescue StandardError => e
-    Rails.logger.error("Failed to fetch Depth for #{self.class.name} #{security_id}: #{e.message}")
     nil
   end
 
@@ -127,6 +121,31 @@ module InstrumentHelpers
       raise "Unsupported exchange and segment combination: #{exchange}, #{segment}"
     end
   end
+
+  private
+
+  def resolve_instrument_code
+    code = instrument_code.presence || instrument_type.presence
+    code ||= InstrumentTypeMapping.underlying_for(self[:instrument_code]).presence if respond_to?(:instrument_code)
+
+    segment_value = respond_to?(:segment) ? segment.to_s.downcase : nil
+    code ||= 'EQUITY' if segment_value == 'equity'
+    code ||= 'INDEX' if segment_value == 'index'
+
+    raise "Missing instrument code for #{symbol_name || security_id}" if code.blank?
+
+    code.to_s.upcase
+  end
+
+  def depth
+    response = DhanHQ::Models::MarketFeed.quote(exch_segment_enum)
+    response['status'] == 'success' ? response.dig('data', exchange_segment, security_id.to_s) : nil
+  rescue StandardError => e
+    Rails.logger.error("Failed to fetch Depth for #{self.class.name} #{security_id}: #{e.message}")
+    nil
+  end
+
+
 
   private
 

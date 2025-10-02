@@ -1,0 +1,32 @@
+shared:
+  risk:
+    session_start: '09:15'
+    session_end: '15:20'
+    max_day_loss_pct: 3.0
+    losers_per_day: 8
+    cooldown_minutes: 3
+  sizing:
+    option_premium_cap_pct: 1.0
+  rate_limiter:
+    qps: 6
+    burst: 10
+    base_delay: 0.5
+    max_delay: 4.0
+    min_spacing: 0.25
+options:
+  cash_balance: 600000
+  poll_interval: 20
+  idempotency_ttl: 90
+  watchlist:
+    - symbol: NIFTY
+      min_oi: 5000
+      max_spread_pct: 1.5
+      stop_loss_pct: 30
+      target_pct: 60
+      trailing_sl_points: 5
+      trailing_jump: 2
+    - symbol: BANKNIFTY
+      min_oi: 4000
+      max_spread_pct: 1.8
+      stop_loss_pct: 35
+      target_pct: 70
