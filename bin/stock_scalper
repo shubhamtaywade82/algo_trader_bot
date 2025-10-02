@@ -1,0 +1,86 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../config/environment'
+require 'yaml'
+
+module StockScalper
+  module_function
+
+  def run
+    Rails.application.eager_load!
+
+    config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.stocks.yml'))
+    config = YAML.load_file(config_path).deep_symbolize_keys
+    shared_cfg = config[:shared] || {}
+    stocks_cfg = config[:stocks] || {}
+
+    infra = Scalpers::Base::Infra.new(shared_cfg)
+    watchlist = prepare_watchlist(stocks_cfg[:watchlist])
+
+    if watchlist.empty?
+      Rails.logger.warn('[StockScalper] No instruments resolved from watchlist. Exiting.')
+      exit(1)
+    end
+
+    feed_runner = Feed::Runner.new(watchlist: watchlist)
+    bars_loop = Bars::FetchLoop.new(
+      watchlist: watchlist,
+      infra: infra,
+      poll_interval: stocks_cfg[:bars_poll_interval] || 45,
+      intervals: stocks_cfg[:intervals] || %w[1 5]
+    )
+
+    scalper_runner = Scalpers::Stocks::Runner.new(
+      infra: infra,
+      watchlist: watchlist,
+      logger: Rails.logger,
+      poll_interval: stocks_cfg[:poll_interval] || 20,
+      idempotency_ttl: stocks_cfg[:idempotency_ttl] || 120,
+      cash_balance: stocks_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital)
+    )
+
+    feed_runner.start!
+    bars_loop.start!
+
+    trap('INT') { shutdown(feed_runner, bars_loop, scalper_runner) }
+    trap('TERM') { shutdown(feed_runner, bars_loop, scalper_runner) }
+
+    scalper_runner.start!
+
+    sleep
+  end
+
+  def prepare_watchlist(rows)
+    Array(rows).filter_map do |row|
+      cfg = row.to_h.deep_symbolize_keys
+      instrument = resolve_instrument(cfg[:symbol])
+      unless instrument
+        Rails.logger.warn("[StockScalper] Instrument not found: #{cfg[:symbol]}")
+        next
+      end
+
+      cfg[:instrument] = instrument
+      cfg[:symbol] = instrument.symbol_name
+      cfg
+    end
+  end
+
+  def resolve_instrument(symbol)
+    return nil unless symbol
+
+    Instrument.find_by(symbol_name: symbol) ||
+      Instrument.find_by(display_name: symbol) ||
+      Instrument.find_by(security_id: symbol.to_s)
+  end
+
+  def shutdown(feed_runner, bars_loop, scalper_runner)
+    Rails.logger.info('[StockScalper] Shutting down...')
+    scalper_runner.stop!
+    feed_runner.stop!
+    bars_loop.stop!
+    exit
+  end
+end
+
+StockScalper.run

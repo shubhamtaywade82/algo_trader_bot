@@ -1,0 +1,102 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative '../config/environment'
+require 'yaml'
+
+module OptionsScalper
+  ALLOWED_UNDERLYINGS = %w[NIFTY50 BANKNIFTY SENSEX].freeze
+
+  module_function
+
+  def run
+    Rails.application.eager_load!
+
+    config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.options.yml'))
+    config = YAML.load_file(config_path).deep_symbolize_keys
+    shared_cfg = config[:shared] || {}
+    options_cfg = config[:options] || {}
+
+    infra = Scalpers::Base::Infra.new(shared_cfg)
+    watchlist = prepare_watchlist(options_cfg[:watchlist])
+
+    if watchlist.empty?
+      Rails.logger.warn('[OptionsScalper] No instruments resolved from watchlist. Exiting.')
+      exit(1)
+    end
+
+    feed_runner = Feed::Runner.new(watchlist: watchlist)
+    bars_loop = Bars::FetchLoop.new(
+      watchlist: watchlist,
+      infra: infra,
+      poll_interval: options_cfg[:bars_poll_interval] || 45,
+      intervals: options_cfg[:intervals] || %w[1 5]
+    )
+
+    scalper_runner = Scalpers::Options::Runner.new(
+      infra: infra,
+      watchlist: watchlist,
+      logger: Rails.logger,
+      poll_interval: options_cfg[:poll_interval] || 20,
+      idempotency_ttl: options_cfg[:idempotency_ttl] || 90,
+      cash_balance: options_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital)
+    )
+
+    feed_runner.start!
+    bars_loop.start!
+
+    trap('INT') { shutdown(feed_runner, bars_loop, scalper_runner) }
+    trap('TERM') { shutdown(feed_runner, bars_loop, scalper_runner) }
+
+    scalper_runner.start!
+
+    sleep
+  end
+
+  def prepare_watchlist(rows)
+    Array(rows).filter_map do |row|
+      cfg = row.to_h.deep_symbolize_keys
+      instrument = resolve_instrument(cfg[:symbol])
+      unless instrument
+        Rails.logger.warn("[OptionsScalper] Instrument not found: #{cfg[:symbol]}")
+        next
+      end
+
+      unless allowed_underlying?(instrument)
+        Rails.logger.warn("[OptionsScalper] Unsupported underlying for options lane: #{instrument.symbol_name}")
+        next
+      end
+
+      cfg[:instrument] = instrument
+      cfg[:symbol] = instrument.symbol_name
+      cfg
+    end
+  end
+
+  def resolve_instrument(symbol)
+    return nil unless symbol
+
+    Instrument.find_by(symbol_name: symbol) ||
+      Instrument.find_by(display_name: symbol) ||
+      Instrument.find_by(security_id: symbol.to_s)
+  end
+
+  def allowed_underlying?(instrument)
+    code = normalize_symbol(instrument.symbol_name) || normalize_symbol(instrument.display_name)
+    ALLOWED_UNDERLYINGS.include?(code)
+  end
+
+  def normalize_symbol(value)
+    value.to_s.upcase.delete(' ')
+  end
+
+  def shutdown(feed_runner, bars_loop, scalper_runner)
+    Rails.logger.info('[OptionsScalper] Shutting down...')
+    scalper_runner.stop!
+    feed_runner.stop!
+    bars_loop.stop!
+    exit
+  end
+end
+
+OptionsScalper.run
