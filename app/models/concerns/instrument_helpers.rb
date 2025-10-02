@@ -126,7 +126,7 @@ module InstrumentHelpers
 
   def resolve_instrument_code
     code = instrument_code.presence || instrument_type.presence
-    code ||= InstrumentTypeMapping.underlying_for(self[:instrument_code]).presence
+    code ||= InstrumentTypeMapping.underlying_for(self[:instrument_code]).presence if respond_to?(:instrument_code)
 
     segment_value = respond_to?(:segment) ? segment.to_s.downcase : nil
     code ||= 'EQUITY' if segment_value == 'equity'

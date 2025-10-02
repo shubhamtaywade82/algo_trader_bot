@@ -47,5 +47,17 @@ module Scalpers
         }.compact
       end
     end
+
+    class Executor
+      class Demo < Executor
+        def execute(decision:, infra:, config: {})
+          @logger.info(
+            "[Scalpers::Options::Demo] BUY #{decision.symbol} qty=#{decision.quantity} "\
+            "entry=#{decision.entry_price} stop=#{decision.stop_loss} target=#{decision.take_profit}"
+          )
+          true
+        end
+      end
+    end
   end
 end

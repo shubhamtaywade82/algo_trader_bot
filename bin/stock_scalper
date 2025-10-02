@@ -49,7 +49,8 @@ module StockScalper
       logger: Rails.logger,
       poll_interval: stocks_cfg[:poll_interval] || 20,
       idempotency_ttl: stocks_cfg[:idempotency_ttl] || 120,
-      cash_balance: stocks_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital)
+      cash_balance: stocks_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital),
+      demo_mode: demo_mode?(stocks_cfg, shared_cfg)
     )
 
     feed_runner.start!
@@ -88,6 +89,17 @@ module StockScalper
     scalper_runner.stop!
     feed_runner.stop!
     bars_loop.stop!
+  end
+
+  def demo_mode?(lane_cfg, shared_cfg)
+    env_demo = ENV.fetch('ENABLE_STOCK_SCALPER', '').casecmp?('demo') || truthy?(ENV['STOCK_SCALPER_DEMO'])
+    config_demo = lane_cfg[:demo_mode]
+    shared_demo = shared_cfg[:demo_mode]
+    env_demo || config_demo || shared_demo
+  end
+
+  def truthy?(value)
+    %w[1 true yes on].include?(value.to_s.strip.downcase)
   end
 end
 

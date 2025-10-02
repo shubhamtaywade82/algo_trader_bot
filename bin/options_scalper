@@ -51,7 +51,8 @@ module OptionsScalper
       logger: Rails.logger,
       poll_interval: options_cfg[:poll_interval] || 20,
       idempotency_ttl: options_cfg[:idempotency_ttl] || 90,
-      cash_balance: options_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital)
+      cash_balance: options_cfg[:cash_balance] || shared_cfg.dig(:sizing, :capital),
+      demo_mode: demo_mode?(options_cfg, shared_cfg)
     )
 
     feed_runner.start!
@@ -106,6 +107,17 @@ module OptionsScalper
     scalper_runner.stop!
     feed_runner.stop!
     bars_loop.stop!
+  end
+
+  def demo_mode?(lane_cfg, shared_cfg)
+    env_demo = ENV.fetch('ENABLE_OPTIONS_SCALPER', '').casecmp?('demo') || truthy?(ENV['OPTIONS_SCALPER_DEMO'])
+    config_demo = lane_cfg[:demo_mode]
+    shared_demo = shared_cfg[:demo_mode]
+    env_demo || config_demo || shared_demo
+  end
+
+  def truthy?(value)
+    %w[1 true yes on].include?(value.to_s.strip.downcase)
   end
 end
 
