@@ -31,8 +31,8 @@ module StockScalper
     watchlist = prepare_watchlist(stocks_cfg[:watchlist], resolver: resolver)
 
     if watchlist.empty?
-      Rails.logger.warn('[StockScalper] No instruments resolved from watchlist. Exiting.')
-      exit(1)
+      Rails.logger.warn('[StockScalper] No instruments resolved from watchlist. Skipping run.')
+      return
     end
 
     feed_runner = Feed::Runner.new(watchlist: watchlist)
@@ -68,7 +68,7 @@ module StockScalper
       cfg = row.to_h.deep_symbolize_keys
       instrument = resolver.call(
         symbol: cfg[:symbol],
-        exchange: cfg[:exchange],
+        exchange: cfg.fetch(:exchange, :nse),
         segment: cfg[:segment] || :equity,
         security_id: cfg[:security_id]
       )
@@ -88,7 +88,6 @@ module StockScalper
     scalper_runner.stop!
     feed_runner.stop!
     bars_loop.stop!
-    exit
   end
 end
 

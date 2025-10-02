@@ -26,18 +26,11 @@ module Instruments
 
       exchange_candidates = candidate_exchanges(exchange, alias_attrs[:exchange])
       segment_candidates = candidate_segments(segment, alias_attrs[:segment])
-      symbol_candidates = candidate_symbols(symbol, token, alias_attrs[:symbol], security_id)
+      search_tokens = candidate_symbols(symbol, token, alias_attrs[:symbol], security_id)
 
       exchange_candidates.each do |ex_key|
         segment_candidates.each do |seg_key|
-          normalized = attrs_normalized_value(symbol, token, alias_attrs[:symbol], security_id)
-
-          symbol_candidates.each do |attrs|
-            instrument = locate(attrs, ex_key, seg_key)
-            return instrument if instrument
-          end
-
-          instrument = locate_normalized(normalized, ex_key, seg_key)
+          instrument = locate(search_tokens, ex_key, seg_key)
           return instrument if instrument
         end
       end
@@ -67,42 +60,37 @@ module Instruments
       raw = symbol.to_s.strip
       alias_symbol ||= token
 
-      candidates = []
-      [raw, token, alias_symbol].compact.uniq.each do |value|
-        next if value.blank?
+      variants = [raw, token, alias_symbol].compact.map(&:strip).reject(&:blank?).uniq
 
-        candidates << { symbol_name: value }
-        candidates << { display_name: value }
-        candidates << { underlying_symbol: value }
+      {
+        security_ids: Array(security_id).compact_blank,
+        raw_variants: variants,
+        normalized_variants: variants.map { |val| normalize(val) }.uniq
+      }
+    end
+
+    def locate(tokens, exchange_key, segment_key)
+      rel = apply_scope(exchange_key, segment_key)
+      return rel.where(security_id: tokens[:security_ids]).first if tokens[:security_ids].present?
+
+      query = nil
+
+      unless tokens[:raw_variants].blank?
+        raw_values = tokens[:raw_variants]
+        query = rel.where(symbol_name: raw_values)
+                  .or(rel.where(display_name: raw_values))
+                  .or(rel.where(underlying_symbol: raw_values))
       end
 
-      candidates << { security_id: security_id.to_s } if security_id.present?
-      candidates.uniq
-    end
-
-    def attrs_normalized_value(symbol, token, alias_symbol, security_id)
-      return security_id.to_s.strip if security_id.present?
-
-      normalize(alias_symbol || token || symbol)
-    end
-
-    def locate(attrs, exchange_key, segment_key)
-      rel = apply_scope(exchange_key, segment_key)
-      sanitized = attrs.compact.transform_values do |value|
-        value.is_a?(String) ? value.strip : value
+      unless tokens[:normalized_variants].blank?
+        normalized = tokens[:normalized_variants]
+        normalized_query = rel.where("REPLACE(upper(symbol_name), ' ', '') IN (?)", normalized)
+                             .or(rel.where("REPLACE(upper(display_name), ' ', '') IN (?)", normalized))
+                             .or(rel.where("REPLACE(upper(underlying_symbol), ' ', '') IN (?)", normalized))
+        query = query ? query.or(normalized_query) : normalized_query
       end
-      return nil if sanitized.empty?
 
-      rel.where(sanitized).first
-    end
-
-    def locate_normalized(token, exchange_key, segment_key)
-      return nil if token.blank?
-
-      rel = apply_scope(exchange_key, segment_key)
-      rel.where(UPPER_REPLACE_SQL % { column: 'symbol_name' }, token).first ||
-        rel.where(UPPER_REPLACE_SQL % { column: 'display_name' }, token).first ||
-        rel.where(UPPER_REPLACE_SQL % { column: 'underlying_symbol' }, token).first
+      query&.first
     end
 
     def apply_scope(exchange_key, segment_key)

@@ -33,8 +33,8 @@ module OptionsScalper
     watchlist = prepare_watchlist(options_cfg[:watchlist], resolver: resolver)
 
     if watchlist.empty?
-      Rails.logger.warn('[OptionsScalper] No instruments resolved from watchlist. Exiting.')
-      exit(1)
+      Rails.logger.warn('[OptionsScalper] No instruments resolved from watchlist. Skipping run.')
+      return
     end
 
     feed_runner = Feed::Runner.new(watchlist: watchlist)
@@ -106,7 +106,6 @@ module OptionsScalper
     scalper_runner.stop!
     feed_runner.stop!
     bars_loop.stop!
-    exit
   end
 end
 

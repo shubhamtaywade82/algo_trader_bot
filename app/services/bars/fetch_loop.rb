@@ -20,6 +20,7 @@ module Bars
       @config = DEFAULTS.merge(opts.deep_symbolize_keys)
       @running = Concurrent::AtomicBoolean.new(false)
       @thread = nil
+      @auth_failure = Concurrent::AtomicBoolean.new(false)
     end
 
     def start!
@@ -54,10 +55,17 @@ module Bars
         instrument = entry[:instrument]
         next unless instrument
 
+        refreshed = []
         @config[:intervals].each do |interval|
-          fetch_and_store(instrument, interval)
+          refreshed << interval if fetch_and_store(instrument, interval)
           sleep(@config[:stagger_delay].to_f)
         end
+
+        next if refreshed.empty?
+
+        @logger.info(
+          "[Bars::FetchLoop] refreshed #{instrument.symbol_name} intervals=#{refreshed.join(',')}"
+        )
       end
     end
 
@@ -65,7 +73,7 @@ module Bars
       response = @infra.with_api_guard do
         instrument.intraday_ohlc(interval: interval, days: 5)
       end
-      return unless response
+      return false unless response
 
       series = CandleSeries.new(symbol: instrument.symbol_name, interval: interval)
       series.load_from_raw(response)
@@ -77,8 +85,18 @@ module Bars
         interval: interval,
         series: series
       )
+      true
+    rescue Scalpers::Errors::InvalidCredentials => e
+      unless @auth_failure.true?
+        @auth_failure.make_true
+        @logger.error("[Bars::FetchLoop] #{instrument.symbol_name} invalid credentials: #{e.message}")
+      end
+      @infra.disable_trading!('invalid_credentials')
+      @running.make_false
+      false
     rescue StandardError => e
       @logger.warn("[Bars::FetchLoop] failed to fetch #{instrument.symbol_name} #{interval}m: #{e.message}")
+      false
     end
   end
 end

@@ -15,6 +15,7 @@ module Scalpers
       :config_key,
       :env_key,
       :default_segment,
+      :default_exchange,
       keyword_init: true
     )
 
@@ -28,7 +29,8 @@ module Scalpers
         config_path: Rails.root.join('config/scalper.stocks.yml'),
         config_key: :stocks,
         env_key: 'ENABLE_STOCK_SCALPER',
-        default_segment: :equity
+        default_segment: :equity,
+        default_exchange: :nse
       ),
       options: LaneSpec.new(
         key: :options,
@@ -36,7 +38,8 @@ module Scalpers
         config_path: Rails.root.join('config/scalper.options.yml'),
         config_key: :options,
         env_key: 'ENABLE_OPTIONS_SCALPER',
-        default_segment: :index
+        default_segment: :index,
+        default_exchange: nil
       )
     }.freeze
 
@@ -61,6 +64,7 @@ module Scalpers
       started = false
       LANES.each_key do |key|
         next unless env_enabled?(key)
+
         started |= start_lane(key, async: async)
       end
       register_shutdown! if started && async
@@ -79,6 +83,7 @@ module Scalpers
       resolver = Instruments::Resolver.new
 
       watchlist = build_watchlist(key, lane_cfg[:watchlist], resolver, lane_spec)
+
       if watchlist.empty?
         @logger.warn("[#{lane_spec.name}] No instruments resolved from watchlist. Skipping.")
         return false
@@ -86,6 +91,7 @@ module Scalpers
 
       infra = Scalpers::Base::Infra.new(shared_cfg)
       feed_runner = Feed::Runner.new(watchlist: watchlist, logger: @logger)
+
       bars_loop = Bars::FetchLoop.new(
         watchlist: watchlist,
         infra: infra,
@@ -187,7 +193,6 @@ module Scalpers
         trap(signal) do
           @logger.info("[#{spec.name}] received #{signal}, shutting down...")
           stop_all
-          exit
         end
       end
     rescue ArgumentError
@@ -232,10 +237,11 @@ module Scalpers
         cfg = row.to_h.deep_symbolize_keys
         instrument = resolver.call(
           symbol: cfg[:symbol],
-          exchange: cfg[:exchange],
+          exchange: cfg.fetch(:exchange, spec.default_exchange),
           segment: cfg[:segment] || spec.default_segment,
           security_id: cfg[:security_id]
         )
+
         unless instrument
           @logger.warn("[#{spec.name}] Instrument not found: #{cfg[:symbol]}")
           next
@@ -254,7 +260,7 @@ module Scalpers
         hints = Instruments::Resolver::INDEX_ALIASES[normalized]
         instrument = resolver.call(
           symbol: cfg[:symbol],
-          exchange: cfg[:exchange] || hints&.dig(:exchange),
+          exchange: cfg.fetch(:exchange, hints&.dig(:exchange) || spec.default_exchange),
           segment: cfg[:segment] || hints&.dig(:segment) || spec.default_segment,
           security_id: cfg[:security_id]
         )
@@ -281,7 +287,7 @@ module Scalpers
 
     def env_enabled?(key)
       spec = LANES.fetch(key)
-      truthy?(ENV[spec.env_key])
+      truthy?(ENV.fetch(spec.env_key, nil))
     end
 
     def lane_running?(key)
