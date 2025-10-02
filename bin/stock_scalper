@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+ENV['RAILS_LOG_TO_STDOUT'] = 'true'
+
 require_relative '../config/environment'
 require 'yaml'
 
@@ -9,14 +11,24 @@ module StockScalper
 
   def run
     Rails.application.eager_load!
+    $stdout.sync = true
+    stdout_logger = Logger.new($stdout)
+    stdout_logger.level = Logger::INFO
+    stdout_logger.formatter = Logger::Formatter.new
+    tagged = ActiveSupport::TaggedLogging.new(stdout_logger)
+    Rails.logger = tagged
+    ActiveRecord::Base.logger = tagged
+    ActiveSupport::LogSubscriber.logger = tagged
+    Rails.logger.info('[StockScalper] Booting...')
 
     config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.stocks.yml'))
     config = YAML.load_file(config_path).deep_symbolize_keys
     shared_cfg = config[:shared] || {}
     stocks_cfg = config[:stocks] || {}
+    resolver = Instruments::Resolver.new
 
     infra = Scalpers::Base::Infra.new(shared_cfg)
-    watchlist = prepare_watchlist(stocks_cfg[:watchlist])
+    watchlist = prepare_watchlist(stocks_cfg[:watchlist], resolver: resolver)
 
     if watchlist.empty?
       Rails.logger.warn('[StockScalper] No instruments resolved from watchlist. Exiting.')
@@ -51,10 +63,15 @@ module StockScalper
     sleep
   end
 
-  def prepare_watchlist(rows)
+  def prepare_watchlist(rows, resolver: Instruments::Resolver.new)
     Array(rows).filter_map do |row|
       cfg = row.to_h.deep_symbolize_keys
-      instrument = resolve_instrument(cfg[:symbol])
+      instrument = resolver.call(
+        symbol: cfg[:symbol],
+        exchange: cfg[:exchange],
+        segment: cfg[:segment] || :equity,
+        security_id: cfg[:security_id]
+      )
       unless instrument
         Rails.logger.warn("[StockScalper] Instrument not found: #{cfg[:symbol]}")
         next
@@ -64,14 +81,6 @@ module StockScalper
       cfg[:symbol] = instrument.symbol_name
       cfg
     end
-  end
-
-  def resolve_instrument(symbol)
-    return nil unless symbol
-
-    Instrument.find_by(symbol_name: symbol) ||
-      Instrument.find_by(display_name: symbol) ||
-      Instrument.find_by(security_id: symbol.to_s)
   end
 
   def shutdown(feed_runner, bars_loop, scalper_runner)

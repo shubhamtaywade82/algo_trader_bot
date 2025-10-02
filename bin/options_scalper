@@ -1,24 +1,36 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+ENV['RAILS_LOG_TO_STDOUT'] = 'true'
+
 require_relative '../config/environment'
 require 'yaml'
 
 module OptionsScalper
-  ALLOWED_UNDERLYINGS = %w[NIFTY50 BANKNIFTY SENSEX].freeze
+  ALLOWED_UNDERLYINGS = %w[NIFTY BANKNIFTY SENSEX].freeze
 
   module_function
 
   def run
     Rails.application.eager_load!
+    $stdout.sync = true
+    stdout_logger = Logger.new($stdout)
+    stdout_logger.level = Logger::INFO
+    stdout_logger.formatter = Logger::Formatter.new
+    tagged = ActiveSupport::TaggedLogging.new(stdout_logger)
+    Rails.logger = tagged
+    ActiveRecord::Base.logger = tagged
+    ActiveSupport::LogSubscriber.logger = tagged
+    Rails.logger.info('[OptionsScalper] Booting...')
 
     config_path = ENV.fetch('SCALPER_CONFIG', Rails.root.join('config/scalper.options.yml'))
     config = YAML.load_file(config_path).deep_symbolize_keys
     shared_cfg = config[:shared] || {}
     options_cfg = config[:options] || {}
+    resolver = Instruments::Resolver.new
 
     infra = Scalpers::Base::Infra.new(shared_cfg)
-    watchlist = prepare_watchlist(options_cfg[:watchlist])
+    watchlist = prepare_watchlist(options_cfg[:watchlist], resolver: resolver)
 
     if watchlist.empty?
       Rails.logger.warn('[OptionsScalper] No instruments resolved from watchlist. Exiting.')
@@ -53,10 +65,16 @@ module OptionsScalper
     sleep
   end
 
-  def prepare_watchlist(rows)
+  def prepare_watchlist(rows, resolver: Instruments::Resolver.new)
     Array(rows).filter_map do |row|
       cfg = row.to_h.deep_symbolize_keys
-      instrument = resolve_instrument(cfg[:symbol])
+      hints = Instruments::Resolver::INDEX_ALIASES[normalize_symbol(cfg[:symbol])]
+      instrument = resolver.call(
+        symbol: cfg[:symbol],
+        exchange: cfg[:exchange] || hints&.dig(:exchange),
+        segment: cfg[:segment] || hints&.dig(:segment) || :index,
+        security_id: cfg[:security_id]
+      )
       unless instrument
         Rails.logger.warn("[OptionsScalper] Instrument not found: #{cfg[:symbol]}")
         next
@@ -73,14 +91,6 @@ module OptionsScalper
     end
   end
 
-  def resolve_instrument(symbol)
-    return nil unless symbol
-
-    Instrument.find_by(symbol_name: symbol) ||
-      Instrument.find_by(display_name: symbol) ||
-      Instrument.find_by(security_id: symbol.to_s)
-  end
-
   def allowed_underlying?(instrument)
     code = normalize_symbol(instrument.symbol_name) || normalize_symbol(instrument.display_name)
     ALLOWED_UNDERLYINGS.include?(code)
@@ -89,6 +99,7 @@ module OptionsScalper
   def normalize_symbol(value)
     value.to_s.upcase.delete(' ')
   end
+
 
   def shutdown(feed_runner, bars_loop, scalper_runner)
     Rails.logger.info('[OptionsScalper] Shutting down...')

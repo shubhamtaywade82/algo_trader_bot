@@ -26,7 +26,7 @@
 - **Super order construction** – `Orders::SuperParamsBuilder` converts strategy intent into DhanHQ SuperOrder payloads with tick-sized prices, trail jumps, and product routing.
 - **Idempotent order placement** – `Orders::Executor` guards entries with advisory locks, caches broker responses, bumps in-memory position state, and honours risk toggles.
 - **Live position supervision** – `Execution::Supervisor` reconciles broker positions, subscribes them on the WebSocket feed, and spawns `Execution::PositionTracker` instances to trail stops, arm breakeven, enforce stale-win exits, and keep super-order brackets synced.
-- **Protective exit utilities** – `Execution::PositionGuard`, `Exits::MicroTP`, `Exits::AlignmentGuard`, and `Orders::SuperModifier` tighten brackets, micro-manage TP/SL under chop, and flatten exposure when trend alignment breaks.
+- **Protective exit utilities** – `Execution::PositionGuard`, `Exits::MicroTp`, `Exits::AlignmentGuard`, and `Orders::SuperModifier` tighten brackets, micro-manage TP/SL under chop, and flatten exposure when trend alignment breaks.
 - **Order closing helpers** – `Orders::Manager` cancels super orders or fires market exits, while `Orders::Closer` offers simple cancellation by client reference.
 
 ## Risk & Capital Management

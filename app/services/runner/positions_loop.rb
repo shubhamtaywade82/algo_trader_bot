@@ -1,16 +1,3 @@
-# app/services/runner/positions_loop.rb (inside loop, when you have p, ltp)
-Positions::Manager.call(position: p)
-Exits::MicroTP.call(
-  order: p.order,
-  ltp: ltp,
-  entry_ts: p.created_at,
-  side: (if p.order&.side&.to_sym == :buy
-           p.option_call? ? :buy_ce : :buy_pe
-         else
-           :unknown
-         end)
-)
-
 # app/services/runner/positions_loop.rb
 module Runner
   class PositionsLoop
@@ -78,7 +65,7 @@ module Runner
 
       # trailer + micro TP / BE (tighten-only)
       Orders::SuperModifier.call(order: p.order) # no-op if nothing to change
-      Exits::MicroTP.call(order: p.order, ltp: ltp, entry_ts: p.created_at, side: infer_side(p))
+      Exits::MicroTp.call(order: p.order, ltp: ltp, entry_ts: p.created_at, side: infer_side(p))
 
       # hard-flat if placing another loss would breach cap is not enough;
       # here we protect against live drawdown crossing the cap immediately:
