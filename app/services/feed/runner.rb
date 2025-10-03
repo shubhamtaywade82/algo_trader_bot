@@ -38,13 +38,18 @@ module Feed
     end
 
     def handle_tick(tick)
-      return unless tick[:segment] && tick[:security_id] && tick[:ltp]
+      data = Live::TickCache.normalize(tick)
+      segment = data[:segment]
+      security_id = data[:security_id]
+      ltp = data[:ltp]
+      ltp_value = ltp.respond_to?(:to_f) ? ltp.to_f : nil
+      return unless segment && security_id && ltp_value && ltp_value.positive?
 
       @ltp_cache.write(
-        segment: tick[:segment],
-        security_id: tick[:security_id],
-        ltp: tick[:ltp],
-        ts: tick[:ts] || Time.zone.now
+        segment: segment,
+        security_id: security_id,
+        ltp: ltp_value,
+        ts: data[:ts] || Time.zone.now
       )
     rescue StandardError => e
       @logger.error("[Feed::Runner] failed to handle tick: #{e.message}")
