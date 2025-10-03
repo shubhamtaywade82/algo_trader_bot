@@ -77,7 +77,11 @@ module Scalpers
           next unless series_1m && series_5m
 
           signal = @infra.engine.signal_for(symbol: instrument.symbol_name || instrument.display_name, series_1m:, series_5m:)
+          @logger.debug "[Scalpers::Runner] signal=#{signal.inspect}"
+
           next unless signal
+
+          log_analysis(signal:, instrument:, series_1m:, series_5m:)
 
           ltp = @infra.ltp_cache.ltp(segment: instrument.exchange_segment, security_id: instrument.security_id)
           ltp ||= instrument.respond_to?(:ltp) ? instrument.ltp : nil
@@ -141,6 +145,35 @@ module Scalpers
 
       def cache_key(decision)
         [decision.symbol, decision.direction, decision.kind].join(':')
+      end
+
+      def log_analysis(signal:, instrument:, series_1m:, series_5m:)
+        meta = signal.metadata || {}
+
+        entries = {
+          symbol: instrument.symbol_name,
+          direction: signal.direction,
+          confidence: round_if_numeric(signal.confidence, 3),
+          regime: signal.regime,
+          reason: signal.reason,
+          supertrend: meta[:supertrend],
+          volume_spike: meta[:volume_spike],
+          atr: round_if_numeric(meta[:atr], 4),
+          last_close: meta[:last_close],
+          candles_1m: series_1m.candles.size,
+          candles_5m: series_5m.candles.size
+        }
+
+        message = entries.map { |k, v| "#{k}=#{v}" }.join(' ')
+        @logger.info("[Scalpers::Analysis] #{message}")
+      rescue StandardError => e
+        @logger.warn("[Scalpers::Analysis] failed to log analysis: #{e.message}")
+      end
+
+      def round_if_numeric(value, precision)
+        return value unless value.is_a?(Numeric)
+
+        value.round(precision)
       end
     end
   end
