@@ -60,6 +60,24 @@ module Live
       self
     end
 
+    # Subscribe using an instrument-like object that exposes the helpers
+    def subscribe_instrument(instrument)
+      payload = extract_subscription_payload(instrument)
+      return false unless payload
+
+      subscribe(seg: payload[:segment], sid: payload[:security_id])
+      true
+    end
+
+    # Unsubscribe using an instrument-like object that exposes the helpers
+    def unsubscribe_instrument(instrument)
+      payload = extract_subscription_payload(instrument)
+      return false unless payload
+
+      unsubscribe(seg: payload[:segment], sid: payload[:security_id])
+      true
+    end
+
     # Register per-app tick listener (non-blocking please)
     def on_tick(&blk)
       @handlers << blk
@@ -99,6 +117,22 @@ module Live
       rescue StandardError
         nil
       end
+    end
+
+    def extract_subscription_payload(instrument)
+      return unless instrument
+
+      if instrument.respond_to?(:ws_subscription_payload)
+        instrument.ws_subscription_payload
+      elsif instrument.respond_to?(:exchange_segment) && instrument.respond_to?(:security_id)
+        {
+          segment: instrument.exchange_segment,
+          security_id: instrument.security_id.to_s
+        }
+      end
+    rescue StandardError => e
+      Rails.logger.warn("[WsHub] failed to extract payload from #{instrument.class}: #{e.message}")
+      nil
     end
 
     def k(seg, sid) = "#{seg}:#{sid}"

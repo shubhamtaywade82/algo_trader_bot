@@ -125,13 +125,23 @@ module Execution
     end
 
     def subscribe!(segment, security_id)
-      Live::WsHub.instance.subscribe(seg: segment, sid: security_id)
+      instrument = lookup_instrument(security_id)
+      if instrument&.respond_to?(:subscribe)
+        instrument.subscribe
+      else
+        Live::WsHub.instance.subscribe(seg: segment, sid: security_id)
+      end
     rescue StandardError => e
       Rails.logger.error("[Supervisor] subscribe #{segment}:#{security_id} failed: #{e.message}")
     end
 
     def unsubscribe!(segment, security_id)
-      Live::WsHub.instance.unsubscribe(seg: segment, sid: security_id)
+      instrument = lookup_instrument(security_id)
+      if instrument&.respond_to?(:unsubscribe)
+        instrument.unsubscribe
+      else
+        Live::WsHub.instance.unsubscribe(seg: segment, sid: security_id)
+      end
     rescue StandardError => e
       Rails.logger.warn("[Supervisor] unsubscribe #{segment}:#{security_id} failed: #{e.message}")
     end
@@ -145,6 +155,14 @@ module Execution
         tracker.snapshot,
         expires_in: 24.hours
       )
+    end
+
+    def lookup_instrument(security_id)
+      sid = security_id.to_s
+      Derivative.find_by(security_id: sid) || Instrument.find_by(security_id: sid)
+    rescue StandardError => e
+      Rails.logger.warn("[Supervisor] lookup instrument #{security_id} failed: #{e.message}")
+      nil
     end
   end
 end

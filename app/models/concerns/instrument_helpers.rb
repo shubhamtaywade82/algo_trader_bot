@@ -27,10 +27,9 @@ module InstrumentHelpers
     # --- WebSocket Stream Management Methods ---
     # Subscribes the current record's security_id to the Live Market Feed.
     def subscribe
-      payload = ws_subscription_payload
-      Live::WsHub.instance.subscribe(seg: payload[:segment], sid: payload[:security_id])
-      Rails.logger.info("Subscribed #{self.class.name} #{security_id} to WS feed.")
-      true
+      subscribed = Live::WsHub.instance.subscribe_instrument(self)
+      Rails.logger.info("Subscribed #{self.class.name} #{security_id} to WS feed.") if subscribed
+      subscribed
     rescue StandardError => e
       Rails.logger.error("Failed to subscribe #{self.class.name} #{security_id}: #{e.message}")
       false
@@ -38,10 +37,9 @@ module InstrumentHelpers
 
     # Unsubscribes the current record's security_id from the Live Market Feed.
     def unsubscribe
-      payload = ws_subscription_payload
-      Live::WsHub.instance.unsubscribe(seg: payload[:segment], sid: payload[:security_id])
-      Rails.logger.info("Unsubscribed #{self.class.name} #{security_id} from WS feed.")
-      true
+      unsubscribed = Live::WsHub.instance.unsubscribe_instrument(self)
+      Rails.logger.info("Unsubscribed #{self.class.name} #{security_id} from WS feed.") if unsubscribed
+      unsubscribed
     rescue StandardError => e
       Rails.logger.error("Failed to unsubscribe #{self.class.name} #{security_id}: #{e.message}")
       false
