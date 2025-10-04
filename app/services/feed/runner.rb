@@ -31,9 +31,11 @@ module Feed
     private
 
     def subscription_payload
-      @watchlist.map do |entry|
+      @watchlist.filter_map do |entry|
         instrument = entry[:instrument]
-        { segment: instrument.exchange_segment, security_id: instrument.security_id }
+        next unless instrument&.respond_to?(:ws_subscription_payload)
+
+        instrument.ws_subscription_payload
       end
     end
 

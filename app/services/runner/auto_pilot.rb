@@ -220,11 +220,13 @@ module Runner
           risk_params: { sl_value: sl, tp_value: tp, trail_sl_value: trail, trail_sl_jump: trail },
           client_ref: client_ref
         )
-        begin
-          Live::WsHub.instance.subscribe(seg: order.instrument.exchange_segment, sid: order.instrument.security_id.to_s)
-        rescue StandardError
-          nil
-        end
+        instrument_to_watch =
+          if order.respond_to?(:instrument)
+            order.instrument
+          else
+            inst
+          end
+        instrument_to_watch.subscribe if instrument_to_watch&.respond_to?(:subscribe)
         register_for_management(order, inst.symbol_name, side: side)
       end
     end
@@ -245,7 +247,7 @@ module Runner
     def subscribe_underlyings!
       @symbols.each do |sym|
         inst = fetch_instrument(sym)
-        Live::WsHub.instance.subscribe(seg: inst.exchange_segment, sid: inst.security_id.to_s) if inst
+        inst.subscribe if inst&.respond_to?(:subscribe)
       end
     end
 

@@ -23,6 +23,29 @@ module InstrumentHelpers
     scope :bse, -> { where(exchange: 'BSE') }
 
     # Validations for enums can also go here, if common
+
+    # --- WebSocket Stream Management Methods ---
+    # Subscribes the current record's security_id to the Live Market Feed.
+    def subscribe
+      payload = ws_subscription_payload
+      Live::WsHub.instance.subscribe(seg: payload[:segment], sid: payload[:security_id])
+      Rails.logger.info("Subscribed #{self.class.name} #{security_id} to WS feed.")
+      true
+    rescue StandardError => e
+      Rails.logger.error("Failed to subscribe #{self.class.name} #{security_id}: #{e.message}")
+      false
+    end
+
+    # Unsubscribes the current record's security_id from the Live Market Feed.
+    def unsubscribe
+      payload = ws_subscription_payload
+      Live::WsHub.instance.unsubscribe(seg: payload[:segment], sid: payload[:security_id])
+      Rails.logger.info("Unsubscribed #{self.class.name} #{security_id} from WS feed.")
+      true
+    rescue StandardError => e
+      Rails.logger.error("Failed to unsubscribe #{self.class.name} #{security_id}: #{e.message}")
+      false
+    end
   end
 
   # Shared instance methods for market data fetching and helpers
@@ -52,7 +75,12 @@ module InstrumentHelpers
   end
 
   def subscribe_params
-    { ExchangeSegment: exchange_segment, SecurityId: security_id.to_s }
+    payload = ws_subscription_payload
+    { ExchangeSegment: payload[:segment], SecurityId: payload[:security_id] }
+  end
+
+  def ws_subscription_payload
+    { segment: exchange_segment, security_id: security_id.to_s }
   end
 
   def ws_get
