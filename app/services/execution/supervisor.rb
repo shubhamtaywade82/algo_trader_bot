@@ -125,7 +125,7 @@ module Execution
     end
 
     def subscribe!(segment, security_id)
-      instrument = lookup_instrument(security_id)
+      instrument = lookup_instrument(segment, security_id)
       if instrument&.respond_to?(:subscribe)
         instrument.subscribe
       else
@@ -136,7 +136,7 @@ module Execution
     end
 
     def unsubscribe!(segment, security_id)
-      instrument = lookup_instrument(security_id)
+      instrument = lookup_instrument(segment, security_id)
       if instrument&.respond_to?(:unsubscribe)
         instrument.unsubscribe
       else
@@ -157,11 +157,24 @@ module Execution
       )
     end
 
-    def lookup_instrument(security_id)
+    def lookup_instrument(segment, security_id)
       sid = security_id.to_s
-      Derivative.find_by(security_id: sid) || Instrument.find_by(security_id: sid)
+      seg = segment.to_s
+
+      [Derivative.find_by(security_id: sid), Instrument.find_by(security_id: sid)]
+        .compact
+        .find { |instrument| instrument_exchange_segment(instrument) == seg }
     rescue StandardError => e
       Rails.logger.warn("[Supervisor] lookup instrument #{security_id} failed: #{e.message}")
+      nil
+    end
+
+    def instrument_exchange_segment(instrument)
+      return unless instrument.respond_to?(:exchange_segment)
+
+      instrument.exchange_segment.to_s
+    rescue StandardError => e
+      Rails.logger.warn("[Supervisor] exchange segment fetch failed for #{instrument.class}: #{e.message}")
       nil
     end
   end
