@@ -56,7 +56,13 @@ module Live
 
     # Convenient multi-subscribe
     def subscribe_many(list)
-      list.each { |h| subscribe(seg: h[:segment] || h['segment'], sid: h[:security_id] || h['security_id']) }
+      Array(list).each do |entry|
+        payload = normalize_subscription_entry(entry)
+        next unless payload
+
+        subscribe(seg: payload[:segment], sid: payload[:security_id])
+      end
+
       self
     end
 
@@ -132,6 +138,31 @@ module Live
       end
     rescue StandardError => e
       Rails.logger.warn("[WsHub] failed to extract payload from #{instrument.class}: #{e.message}")
+      nil
+    end
+
+    def normalize_subscription_entry(entry)
+      case entry
+      when nil
+        nil
+      when Hash
+        segment =
+          entry[:segment] || entry['segment'] ||
+          entry[:exchange_segment] || entry['exchange_segment'] ||
+          entry[:ExchangeSegment] || entry['ExchangeSegment']
+        security_id =
+          entry[:security_id] || entry['security_id'] ||
+          entry[:securityId] || entry['securityId'] ||
+          entry[:SecurityId] || entry['SecurityId']
+
+        return unless segment && security_id
+
+        { segment: segment, security_id: security_id.to_s }
+      else
+        extract_subscription_payload(entry)
+      end
+    rescue StandardError => e
+      Rails.logger.warn("[WsHub] failed to normalize subscription entry #{entry.inspect}: #{e.message}")
       nil
     end
 
