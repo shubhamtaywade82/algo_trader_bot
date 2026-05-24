@@ -3,12 +3,12 @@
 module Scalpers
   module Options
     class Runner
-      def initialize(infra:, watchlist:, policy: nil, sizer: nil, executor: nil, logger: Rails.logger, **opts)
+      def initialize(infra:, watchlist:, policy: nil, sizer: nil, executor: nil, logger: Rails.logger, demo_mode: false, **opts)
         @infra = infra
         chain_picker = ChainPicker.new(logger: logger)
         @policy = policy || Policy.new(chain_picker: chain_picker, logger: logger)
         @sizer = sizer || Sizer.new(base_sizing: infra.sizing, logger: logger)
-        @executor = executor || Executor.new(logger: logger)
+        @executor = executor || build_executor(logger: logger, demo_mode: demo_mode)
         @base_runner = Scalpers::Base::Runner.new(
           infra: infra,
           policy: @policy,
@@ -30,6 +30,14 @@ module Scalpers
 
       def run_once(now: Time.zone.now)
         @base_runner.run_once(now: now)
+      end
+
+      private
+
+      def build_executor(logger:, demo_mode:)
+        return Executor::Demo.new(logger: logger) if demo_mode
+
+        Executor.new(logger: logger)
       end
     end
   end

@@ -30,7 +30,7 @@ Rails.root.glob('spec/support/**/*.rb').sort_by(&:to_s).each { |f| require f }
 # recreate the test database by loading the schema.
 # If you are not using ActiveRecord, you can remove these lines.
 begin
-  ActiveRecord::Migration.maintain_test_schema!
+  ActiveRecord::Migration.maintain_test_schema! unless ENV['SKIP_AR_SCHEMA_CHECK'] == '1'
 rescue ActiveRecord::PendingMigrationError => e
   abort e.to_s.strip
 end
@@ -43,7 +43,7 @@ RSpec.configure do |config|
   # If you're not using ActiveRecord, or you'd prefer not to run each of your
   # examples within a transaction, remove the following line or assign false
   # instead of true.
-  config.use_transactional_fixtures = true
+  config.use_transactional_fixtures = ENV['SKIP_AR_SCHEMA_CHECK'] == '1' ? false : true
 
   # You can uncomment this line to turn off ActiveRecord support entirely.
   # config.use_active_record = false

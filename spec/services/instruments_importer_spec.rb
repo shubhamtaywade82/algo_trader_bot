@@ -21,7 +21,7 @@ RSpec.describe InstrumentsImporter do
   let(:instrument_row) do
     [
       '26000', 'NSE', 'I', 'INE123456789', 'INDEX', '26000', 'NIFTY',
-      'NIFTY 50', 'NIFTY 50', 'INDEX', '', '0', '', '', '', '0.05', '', '',
+      'NIFTY', 'NIFTY', 'INDEX', '', '0', '', '', '', '0.05', '', '',
       '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '',
       '', '', ''
     ].join(',')

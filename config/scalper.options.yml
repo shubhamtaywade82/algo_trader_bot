@@ -18,7 +18,7 @@ options:
   poll_interval: 20
   idempotency_ttl: 90
   watchlist:
-    - symbol: NIFTY 50
+    - symbol: NIFTY
       min_oi: 5000
       max_spread_pct: 1.5
       stop_loss_pct: 30

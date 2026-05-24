@@ -1,6 +1,6 @@
 # app/services/exits/micro_tp.rb
 # Tightens TP and arms BE when live conditions indicate chop after entry.
-class Exits::MicroTP < ApplicationService
+class Exits::MicroTp < ApplicationService
   # order: Order with super_ref, tp_value, trail_sl_value, entry_price
   # ltp:   current premium
   # entry_ts: Time the position was opened
@@ -28,7 +28,7 @@ class Exits::MicroTP < ApplicationService
 
     time_stop!
   rescue StandardError => e
-    Rails.logger.warn("[MicroTP] #{e.class} #{e.message}")
+    Rails.logger.warn("[MicroTp] #{e.class} #{e.message}")
   end
 
   private

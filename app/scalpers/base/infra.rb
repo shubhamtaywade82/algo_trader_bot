@@ -77,11 +77,17 @@ module Scalpers
             disable_trading!("fatal_error: #{e.message}")
             @backoff.register_attempt!
             raise
-          rescue DhanHQ::Errors::ThrottleError, DhanHQ::Errors::ServiceError => e
-            Rails.logger.warn("[Scalpers::Base::Infra] broker throttled: #{e.message}")
+          rescue DhanHQ::RateLimitError, DhanHQ::NetworkError => e
+            Rails.logger.warn("[Scalpers::Base::Infra] broker throttled/network issue: #{e.message}")
             @backoff.register_attempt!
             sleep(@backoff.next_interval)
           rescue StandardError => e
+            if auth_error?(e)
+              Rails.logger.error("[Scalpers::Base::Infra] authentication error: #{e.message}")
+              disable_trading!('invalid_credentials')
+              raise Scalpers::Errors::InvalidCredentials, e.message
+            end
+
             Rails.logger.error("[Scalpers::Base::Infra] unexpected error: #{e.message}")
             @backoff.register_attempt!
             sleep(@backoff.next_interval)
@@ -90,6 +96,8 @@ module Scalpers
       end
 
       private
+
+      AUTH_ERROR_CODES = %w[DH-901 DH-902 DH-903 DH-807 DH-808 DH-809 DH-810].freeze
 
       def respect_call_spacing
         gap = @min_call_gap.to_f
@@ -101,6 +109,13 @@ module Scalpers
           sleep(wait) if wait.positive?
           @last_call_ts = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         end
+      end
+
+      def auth_error?(error)
+        return true if error.is_a?(Scalpers::Errors::InvalidCredentials)
+
+        message = error.message.to_s
+        AUTH_ERROR_CODES.any? { |code| message.include?(code) }
       end
     end
   end
