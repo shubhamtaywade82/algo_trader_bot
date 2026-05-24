@@ -1,3 +1,5 @@
+> **DEPRECATED** — This repo is archived. Replaced by [`algo_scalper_api`](../algo_scalper_api). See [DEPRECATED.md](./DEPRECATED.md).
+
 # 📈 AlgoTradingBot (Rails-based)
 
 An advanced, modular, event-driven algorithmic trading bot for **Options Buying** and **equity scalping** using **DhanHQ APIs**, **technical indicators**, **Telegram alerts**, and **AI-assisted strategy reasoning**.
